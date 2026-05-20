@@ -1,5 +1,5 @@
 #Requires -RunAsAdministrator
-# System Integrity Audit Script v2
+# System Integrity Audit Script v2.1 (Fixed)
 # Repo: https://github.com/developer-for-all-games/SystemAudit
 # Run: irm "https://raw.githubusercontent.com/developer-for-all-games/SystemAudit/main/SystemAudit.ps1" | iex
 
@@ -70,46 +70,56 @@ $gpu = Get-CimInstance Win32_VideoController | Select-Object Name, AdapterRAM, D
 Write-Log "GPU" $gpu "GPU"
 
 # ========== CURRENTLY PLUGGED IN DEVICES ==========
-Write-Section "CURRENTLY CONNECTED HARDWARE"
+Write-Log "CURRENTLY CONNECTED HARDWARE" "[Analyzing active devices...]"
 
 # USB devices currently plugged in
-$pluggedUSB = Get-PnpDevice -Class USB | Where-Object { $_.Status -eq 'OK' } | 
+$pluggedUSB = Get-PnpDevice -Class USB -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'OK' } | 
     Select-Object Name, InstanceId, @{N='Type';E={$_.Class}}, Status, @{N='Present';E={$_.Present}}
 Write-Log "USB DEVICES CURRENTLY PLUGGED IN" $pluggedUSB "USB_Currently_Connected"
 
 # HID devices (keyboards, mice, gamepads)
-$hidDevices = Get-PnpDevice -Class HIDClass | Where-Object { $_.Status -eq 'OK' } | 
+$hidDevices = Get-PnpDevice -Class HIDClass -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'OK' } | 
     Select-Object Name, InstanceId, Status
 Write-Log "HID DEVICES (Keyboards/Mice/Controllers)" $hidDevices "HID_Devices"
 
 # Audio devices
-$audioDevices = Get-PnpDevice -Class AudioEndpoint, MEDIA | Where-Object { $_.Status -eq 'OK' } | 
+$audioDevices = Get-PnpDevice -Class AudioEndpoint, MEDIA -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'OK' } | 
     Select-Object Name, InstanceId, @{N='Class';E={$_.Class}}, Status
 Write-Log "AUDIO DEVICES CURRENTLY CONNECTED" $audioDevices "Audio_Devices"
 
-# Monitors/Displays
-$monitors = Get-CimInstance WmiMonitorBasicDisplayParams | ForEach-Object {
-    $id = ($_.InstanceName -split '\\')[1]
-    [PSCustomObject]@{
-        MonitorID = $id
-        SupportedDisplayModes = $_.SupportedDisplayModes
-        NativeResolution = if ($_.NativeResolution) { "$($_.NativeResolution.X)x$($_.NativeResolution.Y)" } else { "N/A" }
+# Monitors/Displays - Fixed with try/catch for WMI class
+$monitors = @()
+try {
+    $monitors = Get-CimInstance WmiMonitorBasicDisplayParams -ErrorAction Stop | ForEach-Object {
+        $id = ($_.InstanceName -split '\\')[1]
+        [PSCustomObject]@{
+            MonitorID = $id
+            SupportedDisplayModes = $_.SupportedDisplayModes
+            NativeResolution = if ($_.NativeResolution) { "$($_.NativeResolution.X)x$($_.NativeResolution.Y)" } else { "N/A" }
+        }
     }
+} catch {
+    $monitors = @([PSCustomObject]@{Note="WmiMonitorBasicDisplayParams not available on this system"; Error=$_.Exception.Message})
 }
 Write-Log "MONITORS CURRENTLY CONNECTED" $monitors "Monitors"
 
 # Storage devices currently attached
-$storage = Get-CimInstance Win32_DiskDrive | Select-Object Model, Size, InterfaceType, MediaType, SerialNumber, Partitions
+$storage = Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue | Select-Object Model, Size, InterfaceType, MediaType, SerialNumber, Partitions
 Write-Log "PHYSICAL STORAGE DRIVES" $storage "Storage_Drives"
 
 # Network adapters
-$netAdapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | 
+$netAdapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | 
     Select-Object Name, InterfaceDescription, MacAddress, LinkSpeed, MediaConnectionState
 Write-Log "ACTIVE NETWORK ADAPTERS" $netAdapters "Network_Adapters"
 
-# Bluetooth devices
-$bluetooth = Get-PnpDevice -Class Bluetooth | Where-Object { $_.Status -eq 'OK' } | 
-    Select-Object Name, InstanceId, Status
+# Bluetooth devices - Fixed with error handling
+$bluetooth = @()
+try {
+    $bluetooth = Get-PnpDevice -Class Bluetooth -ErrorAction Stop | Where-Object { $_.Status -eq 'OK' } | 
+        Select-Object Name, InstanceId, Status
+} catch {
+    $bluetooth = @([PSCustomObject]@{Note="No Bluetooth devices found or Bluetooth disabled"; Error=$_.Exception.Message})
+}
 Write-Log "BLUETOOTH DEVICES" $bluetooth "Bluetooth"
 
 # ========== PREFETCH ==========
