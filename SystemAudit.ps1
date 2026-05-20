@@ -1,5 +1,5 @@
 #Requires -RunAsAdministrator
-# System Integrity Audit Script v3.0 - Windows 10/11 Compatible
+# System Integrity Audit Script v3.1 - Windows 10/11 Compatible
 # Repo: https://github.com/developer-for-all-games/SystemAudit
 # Run: irm "https://raw.githubusercontent.com/developer-for-all-games/SystemAudit/main/SystemAudit.ps1" | iex
 
@@ -62,7 +62,6 @@ try {
     }
     Write-Log "WINDOWS INSTALL DATE & SYSTEM INFO" $osInfo "OS_Info"
 } catch {
-    # Fallback for older WMI
     $osInfo = [PSCustomObject]@{
         Note = "Limited system info (WMI fallback)"
         Error = $_.Exception.Message
@@ -107,13 +106,12 @@ try {
 # ========== CURRENTLY PLUGGED IN DEVICES ==========
 Write-Log "CURRENTLY CONNECTED HARDWARE" "[Analyzing active devices...]"
 
-# USB devices currently plugged in - Compatible method
+# USB devices currently plugged in
 $pluggedUSB = @()
 try {
     $pluggedUSB = Get-PnpDevice -Class USB -ErrorAction Stop | Where-Object { $_.Status -eq 'OK' } | 
         Select-Object Name, InstanceId, @{N='Type';E={$_.Class}}, Status, @{N='Present';E={$_.Present}}
 } catch {
-    # Fallback: Query WMI directly
     $pluggedUSB = Get-WmiObject Win32_PnPEntity -ErrorAction SilentlyContinue | 
         Where-Object { $_.PNPClass -eq 'USB' -and $_.Status -eq 'OK' } |
         Select-Object Name, DeviceID, @{N='Type';E={$_.PNPClass}}, Status
@@ -144,7 +142,7 @@ try {
 }
 Write-Log "AUDIO DEVICES CURRENTLY CONNECTED" $audioDevices "Audio_Devices"
 
-# Monitors/Displays - Multi-method fallback
+# Monitors/Displays - Fixed: Registry-based detection, no Forms assembly needed
 $monitors = @()
 try {
     # Try CIM first (Win11 preferred)
@@ -167,13 +165,31 @@ try {
             }
         }
     } catch {
-        # Final fallback: desktop resolution
-        $monitors = @([PSCustomObject]@{
-            MonitorID = "Desktop Resolution"
-            SupportedDisplayModes = "N/A"
-            NativeResolution = "$([System.Windows.Forms.Screen]::AllScreens[0].Bounds.Width)x$([System.Windows.Forms.Screen]::AllScreens[0].Bounds.Height)"
-            Note = "WmiMonitorBasicDisplayParams not available - using screen resolution fallback"
-        })
+        # Final fallback: Registry-based monitor detection (works on all Windows versions)
+        $monitorRegPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY"
+        if (Test-Path $monitorRegPath) {
+            Get-ChildItem $monitorRegPath -ErrorAction SilentlyContinue | ForEach-Object {
+                Get-ChildItem $_.PSPath -ErrorAction SilentlyContinue | ForEach-Object {
+                    $monitorProps = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                    $monitors += [PSCustomObject]@{
+                        MonitorID = $_.PSChildName
+                        FriendlyName = $monitorProps.FriendlyName
+                        DeviceDesc = $monitorProps.DeviceDesc
+                        Mfg = $monitorProps.Mfg
+                        Note = "Detected via registry fallback"
+                    }
+                }
+            }
+        }
+        if ($monitors.Count -eq 0) {
+            $monitors = @([PSCustomObject]@{
+                MonitorID = "Unknown"
+                FriendlyName = "Monitor detection unavailable on this system"
+                DeviceDesc = "WmiMonitorBasicDisplayParams not available"
+                Mfg = "N/A"
+                Note = "Use 'dxdiag' or Display Settings to view monitors"
+            })
+        }
     }
 }
 Write-Log "MONITORS CURRENTLY CONNECTED" $monitors "Monitors"
@@ -293,7 +309,6 @@ try {
         Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, 
         @{N='Process';E={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName}}, OwningProcess
 } catch {
-    # Win10 fallback: netstat parsing
     $netstat = netstat -ano | Select-String "ESTABLISHED"
     $net = $netstat | ForEach-Object {
         $parts = ($_ -split '\s+') | Where-Object { $_ }
@@ -316,7 +331,6 @@ try {
     $tasks = Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.State -ne "Disabled" } | 
         Select-Object TaskName, Author, @{N='Action';E={($_.Actions|Select-Object -First 1).Execute}}, State
 } catch {
-    # Fallback: schtasks command
     $schtasks = schtasks /query /fo csv /v | ConvertFrom-Csv | Where-Object { $_.'Run As User' -ne 'N/A' }
     $tasks = $schtasks | Select-Object @{N='TaskName';E={$_.TaskName}}, @{N='Author';E={$_.'Run As User'}}, @{N='Action';E={$_.'Task To Run'}}, @{N='State';E={$_.'Scheduled Task State'}}
 }
