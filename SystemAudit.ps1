@@ -1,5 +1,5 @@
 #Requires -RunAsAdministrator
-# System Integrity Audit Script
+# System Integrity Audit Script v2
 # Repo: https://github.com/developer-for-all-games/SystemAudit
 # Run: irm "https://raw.githubusercontent.com/developer-for-all-games/SystemAudit/main/SystemAudit.ps1" | iex
 
@@ -33,9 +33,84 @@ function Write-Log {
 Add-Content -Path $LogFile -Value "SYSTEM AUDIT REPORT - $(Get-Date)"
 Add-Content -Path $LogFile -Value "Computer: $env:COMPUTERNAME | User: $env:USERNAME"
 
-# ========== SYSTEM INFO ==========
+# ========== SYSTEM INFO & WINDOWS INSTALL DATE ==========
 $os = Get-CimInstance Win32_OperatingSystem
-Write-Log "Operating System" ($os | Select-Object Caption, Version, BuildNumber, OSArchitecture, @{N='InstallDate';E={$_.InstallDate}}, @{N='LastBoot';E={$_.LastBootUpTime}}) "OS_Info"
+$installDate = $os.InstallDate
+$uptime = (Get-Date) - $os.LastBootUpTime
+
+$osInfo = [PSCustomObject]@{
+    Caption = $os.Caption
+    Version = $os.Version
+    BuildNumber = $os.BuildNumber
+    Architecture = $os.OSArchitecture
+    InstallDate = $installDate
+    InstallDateFormatted = $installDate.ToString("yyyy-MM-dd HH:mm:ss")
+    DaysSinceInstall = [math]::Round(((Get-Date) - $installDate).TotalDays, 0)
+    LastBootTime = $os.LastBootUpTime
+    Uptime = "$($uptime.Days)d $($uptime.Hours)h $($uptime.Minutes)m"
+    SerialNumber = $os.SerialNumber
+    RegisteredUser = $os.RegisteredUser
+    TotalRAM_GB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
+    FreeRAM_GB = [math]::Round($os.FreePhysicalMemory / 1MB, 2)
+}
+
+Write-Log "WINDOWS INSTALL DATE & SYSTEM INFO" $osInfo "OS_Info"
+
+# ========== BIOS & HARDWARE ==========
+$bios = Get-CimInstance Win32_BIOS | Select-Object Manufacturer, Name, SerialNumber, Version, @{N='ReleaseDate';E={$_.ReleaseDate}}
+Write-Log "BIOS Information" $bios "BIOS_Info"
+
+$mobo = Get-CimInstance Win32_BaseBoard | Select-Object Manufacturer, Product, SerialNumber, Version
+Write-Log "Motherboard" $mobo "Motherboard"
+
+$cpu = Get-CimInstance Win32_Processor | Select-Object Name, Manufacturer, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed
+Write-Log "CPU" $cpu "CPU"
+
+$gpu = Get-CimInstance Win32_VideoController | Select-Object Name, AdapterRAM, DriverVersion, VideoModeDescription
+Write-Log "GPU" $gpu "GPU"
+
+# ========== CURRENTLY PLUGGED IN DEVICES ==========
+Write-Section "CURRENTLY CONNECTED HARDWARE"
+
+# USB devices currently plugged in
+$pluggedUSB = Get-PnpDevice -Class USB | Where-Object { $_.Status -eq 'OK' } | 
+    Select-Object Name, InstanceId, @{N='Type';E={$_.Class}}, Status, @{N='Present';E={$_.Present}}
+Write-Log "USB DEVICES CURRENTLY PLUGGED IN" $pluggedUSB "USB_Currently_Connected"
+
+# HID devices (keyboards, mice, gamepads)
+$hidDevices = Get-PnpDevice -Class HIDClass | Where-Object { $_.Status -eq 'OK' } | 
+    Select-Object Name, InstanceId, Status
+Write-Log "HID DEVICES (Keyboards/Mice/Controllers)" $hidDevices "HID_Devices"
+
+# Audio devices
+$audioDevices = Get-PnpDevice -Class AudioEndpoint, MEDIA | Where-Object { $_.Status -eq 'OK' } | 
+    Select-Object Name, InstanceId, @{N='Class';E={$_.Class}}, Status
+Write-Log "AUDIO DEVICES CURRENTLY CONNECTED" $audioDevices "Audio_Devices"
+
+# Monitors/Displays
+$monitors = Get-CimInstance WmiMonitorBasicDisplayParams | ForEach-Object {
+    $id = ($_.InstanceName -split '\\')[1]
+    [PSCustomObject]@{
+        MonitorID = $id
+        SupportedDisplayModes = $_.SupportedDisplayModes
+        NativeResolution = if ($_.NativeResolution) { "$($_.NativeResolution.X)x$($_.NativeResolution.Y)" } else { "N/A" }
+    }
+}
+Write-Log "MONITORS CURRENTLY CONNECTED" $monitors "Monitors"
+
+# Storage devices currently attached
+$storage = Get-CimInstance Win32_DiskDrive | Select-Object Model, Size, InterfaceType, MediaType, SerialNumber, Partitions
+Write-Log "PHYSICAL STORAGE DRIVES" $storage "Storage_Drives"
+
+# Network adapters
+$netAdapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | 
+    Select-Object Name, InterfaceDescription, MacAddress, LinkSpeed, MediaConnectionState
+Write-Log "ACTIVE NETWORK ADAPTERS" $netAdapters "Network_Adapters"
+
+# Bluetooth devices
+$bluetooth = Get-PnpDevice -Class Bluetooth | Where-Object { $_.Status -eq 'OK' } | 
+    Select-Object Name, InstanceId, Status
+Write-Log "BLUETOOTH DEVICES" $bluetooth "Bluetooth"
 
 # ========== PREFETCH ==========
 $prefetch = Get-ChildItem "C:\Windows\Prefetch" -Filter "*.pf" -ErrorAction SilentlyContinue | 
@@ -73,17 +148,22 @@ $ifeo = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image 
     }
 Write-Log "IFEO Debuggers (Injection Check)" $ifeo "Registry_IFEO"
 
-# ========== USB DEVICES ==========
+# ========== USB HISTORY (ALL EVER CONNECTED) ==========
 $usb = @()
 if (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Enum\USBSTOR") {
     Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Enum\USBSTOR" | ForEach-Object {
         Get-ChildItem $_.PSPath | ForEach-Object {
             $p = Get-ItemProperty $_.PSPath
-            $usb += [PSCustomObject]@{DeviceID=$_.PSChildName; FriendlyName=$p.FriendlyName; Mfg=$p.Mfg}
+            $usb += [PSCustomObject]@{
+                DeviceID=$_.PSChildName
+                FriendlyName=$p.FriendlyName
+                Mfg=$p.Mfg
+                Service=$p.Service
+            }
         }
     }
 }
-Write-Log "USB Storage History" $usb "USB_History"
+Write-Log "USB STORAGE HISTORY (All Time)" $usb "USB_History"
 
 # ========== INSTALLED SOFTWARE ==========
 $software = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
@@ -152,14 +232,27 @@ $summary = @"
 AUDIT COMPLETE: $(Get-Date)
 Log: $LogFile
 CSV Folder: $CsvFolder
-Prefetch: $($prefetch.Count) | USB Devices: $($usb.Count) | Software: $($software.Count)
+
+WINDOWS INSTALL DATE: $($osInfo.InstallDateFormatted) ($($osInfo.DaysSinceInstall) days ago)
+SYSTEM UPTIME: $($osInfo.Uptime)
+CURRENTLY PLUGGED IN:
+- USB Devices: $($pluggedUSB.Count)
+- HID (Keyboard/Mouse): $($hidDevices.Count)
+- Audio: $($audioDevices.Count)
+- Monitors: $($monitors.Count)
+- Storage Drives: $($storage.Count)
+- Network Adapters: $($netAdapters.Count)
+- Bluetooth: $($bluetooth.Count)
+
+Prefetch: $($prefetch.Count) | USB History: $($usb.Count) | Software: $($software.Count)
 Processes: $($procs.Count) | Suspicious Procs: $($susProcs.Count) | Suspicious Files: $($foundFiles.Count)
 "@
 Add-Content -Path $LogFile -Value "`n$summary"
 
 if (-not $Silent) {
     Write-Host "`n=== AUDIT COMPLETE ===" -ForegroundColor Green
+    Write-Host "Windows Installed: $($osInfo.InstallDateFormatted) ($($osInfo.DaysSinceInstall) days ago)" -ForegroundColor Cyan
+    Write-Host "Currently Plugged In: $($pluggedUSB.Count) USB, $($hidDevices.Count) HID, $($monitors.Count) Monitors" -ForegroundColor Cyan
     Write-Host "Log: $LogFile" -ForegroundColor Cyan
     Write-Host "CSV: $CsvFolder" -ForegroundColor Cyan
-    Write-Host $summary
 }
