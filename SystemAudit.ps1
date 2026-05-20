@@ -1,5 +1,5 @@
 #Requires -RunAsAdministrator
-# System Integrity Audit Script v3.1 - Windows 10/11 Compatible
+# System Integrity Audit Script v3.2 - Windows 10/11 Compatible (Forms Fix)
 # Repo: https://github.com/developer-for-all-games/SystemAudit
 # Run: irm "https://raw.githubusercontent.com/developer-for-all-games/SystemAudit/main/SystemAudit.ps1" | iex
 
@@ -142,7 +142,7 @@ try {
 }
 Write-Log "AUDIO DEVICES CURRENTLY CONNECTED" $audioDevices "Audio_Devices"
 
-# Monitors/Displays - Fixed: Registry-based detection, no Forms assembly needed
+# Monitors/Displays - FIXED: Pure registry detection, no System.Windows.Forms needed
 $monitors = @()
 try {
     # Try CIM first (Win11 preferred)
@@ -165,29 +165,33 @@ try {
             }
         }
     } catch {
-        # Final fallback: Registry-based monitor detection (works on all Windows versions)
+        # Final fallback: Registry-based monitor detection (NO System.Windows.Forms)
         $monitorRegPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY"
         if (Test-Path $monitorRegPath) {
             Get-ChildItem $monitorRegPath -ErrorAction SilentlyContinue | ForEach-Object {
-                Get-ChildItem $_.PSPath -ErrorAction SilentlyContinue | ForEach-Object {
+                $displayKey = $_.PSPath
+                Get-ChildItem $displayKey -ErrorAction SilentlyContinue | ForEach-Object {
                     $monitorProps = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-                    $monitors += [PSCustomObject]@{
-                        MonitorID = $_.PSChildName
-                        FriendlyName = $monitorProps.FriendlyName
-                        DeviceDesc = $monitorProps.DeviceDesc
-                        Mfg = $monitorProps.Mfg
-                        Note = "Detected via registry fallback"
+                    if ($monitorProps) {
+                        $monitors += [PSCustomObject]@{
+                            MonitorID = $_.PSChildName
+                            FriendlyName = if ($monitorProps.FriendlyName) { $monitorProps.FriendlyName } else { "Unknown Display" }
+                            DeviceDesc = if ($monitorProps.DeviceDesc) { $monitorProps.DeviceDesc } else { "N/A" }
+                            Mfg = if ($monitorProps.Mfg) { $monitorProps.Mfg } else { "N/A" }
+                            DetectionMethod = "Registry Fallback"
+                        }
                     }
                 }
             }
         }
+        # If still empty, provide info message
         if ($monitors.Count -eq 0) {
             $monitors = @([PSCustomObject]@{
-                MonitorID = "Unknown"
-                FriendlyName = "Monitor detection unavailable on this system"
-                DeviceDesc = "WmiMonitorBasicDisplayParams not available"
+                MonitorID = "No monitors detected"
+                FriendlyName = "WmiMonitorBasicDisplayParams not available on this system"
+                DeviceDesc = "Use 'dxdiag' or Display Settings to view connected monitors"
                 Mfg = "N/A"
-                Note = "Use 'dxdiag' or Display Settings to view monitors"
+                DetectionMethod = "Unavailable"
             })
         }
     }
