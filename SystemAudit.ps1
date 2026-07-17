@@ -1,6 +1,6 @@
 #Requires -RunAsAdministrator
 # =============================================================================
-#  SYSTEM INTEGRITY AUDIT SCRIPT v6.5
+#  SYSTEM INTEGRITY AUDIT SCRIPT v6.5.1
 #  Enhanced Forensics Suite with AI Bot Detection & R6S Stats Integration
 #  Repo: https://github.com/developer-for-all-games/SystemAudit
 #  Run: irm "https://raw.githubusercontent.com/developer-for-all-games/SystemAudit/main/SystemAudit.ps1" | iex
@@ -105,16 +105,13 @@ function Get-OneDrivePath {
     return $oneDrivePaths | Sort-Object -Unique
 }
 
-# ========== R6S ACCOUNT DISCOVERY v3.0 - Source-Tracked ==========
+# ========== R6S ACCOUNT DISCOVERY v3.1 - Balanced ==========
 function Find-R6SAccounts {
-    # Each entry: @{ Username = "..."; Score = N; Sources = @("source1", "source2") }
     $foundAccounts = @()
 
-    # Helper to add/find account with source tracking
     function Add-Account {
         param([string]$Username, [int]$Score, [string]$Source)
 
-        # Basic validation
         if ($Username.Length -lt 3 -or $Username.Length -gt 32) { return }
         if ($Username -match '^[0-9]+$') { return }
         if ($Username -match '^[._-]+$') { return }
@@ -134,7 +131,6 @@ function Find-R6SAccounts {
         }
     }
 
-    # === GET ALL USERS & PATHS ===
     $allUsers = @()
     try { $allUsers = Get-ChildItem "C:\Users" -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name } catch {}
 
@@ -144,7 +140,7 @@ function Find-R6SAccounts {
     $oneDrivePaths += "$env:USERPROFILE\OneDrive"
     $oneDrivePaths = $oneDrivePaths | Sort-Object -Unique
 
-    # === METHOD 1: R6S Save Folder - MOST RELIABLE ===
+    # === METHOD 1: R6S Save Folder ===
     $r6sPaths = @()
     $r6sPaths += "$env:USERPROFILE\Documents\My Games\Rainbow Six - Siege"
     foreach ($u in $allUsers) {
@@ -162,149 +158,147 @@ function Find-R6SAccounts {
             Where-Object { $_.Name -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' }
 
         foreach ($folder in $guidFolders) {
-            # Check GameSettings.ini for explicit username fields
             $gameSettings = "$($folder.FullName)\GameSettings.ini"
             if (Test-Path $gameSettings) {
                 try {
                     $content = Get-Content $gameSettings -Raw -ErrorAction SilentlyContinue
                     if ($content) {
-                        # R6S ini files sometimes have DataCenterHint but not username
-                        # Look for any custom key that might hold a username
                         $iniMatches = [regex]::Matches($content, '(?im)^\s*([a-zA-Z0-9_]+)\s*=\s*([a-zA-Z0-9_.\-]{3,32})\s*$')
                         foreach ($m in $iniMatches) {
                             $key = $m.Groups[1].Value.Trim().ToLower()
                             $val = $m.Groups[2].Value.Trim()
-                            # Only accept if key suggests it's a username
                             if ($key -match 'user|name|player|account|profile|persona') {
-                                Add-Account -Username $val -Score 15 -Source "R6S_GameSettings.ini"
+                                Add-Account -Username $val -Score 15 -Source "R6S_GameSettings"
                             }
                         }
                     }
                 } catch {}
             }
 
-            # Check for screenshots with username in filename
-            $mediaFiles = Get-ChildItem $folder.FullName -Recurse -File -ErrorAction SilentlyContinue | 
-                Where-Object { $_.Extension -in '.png','.jpg','.jpeg','.bmp' }
-            foreach ($mf in $mediaFiles) {
-                $base = $mf.BaseName
-                # R6S screenshot format: usually "Rainbow Six-2023.01.15-12.34.56-..." or custom
-                # Only accept if filename has clear username pattern (not just dates/numbers)
-                if ($base -match '(?i)[a-z][a-z0-9_.\-]{2,30}[a-z0-9]') {
-                    $candidate = $Matches[0]
-                    # Must not be a date pattern
-                    if ($candidate -notmatch '^\d{4}[._-]?\d{2}[._-]?\d{2}$' -and 
-                        $candidate -notmatch '^\d{2}[._-]?\d{2}[._-]?\d{2}[._-]?\d{2}$' -and
-                        $candidate -notmatch '^(screenshot|image|pic|photo|snapshot| Rainbow Six)$') {
-                        Add-Account -Username $candidate -Score 5 -Source "R6S_Screenshot"
-                    }
+            # Check ALL files in the GUID folder for username patterns
+            $allFiles = Get-ChildItem $folder.FullName -Recurse -File -ErrorAction SilentlyContinue | 
+                Where-Object { $_.Length -lt 5MB }
+            foreach ($file in $allFiles) {
+                if ($file.Extension -notin '.exe','.dll','.sys','.pak','.ucas','.utoc') {
+                    try {
+                        $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+                        if ($content) {
+                            $patterns = @(
+                                '"nameOnPlatform"\s*:\s*"([^"]{3,32})"',
+                                '"uplay_name"\s*:\s*"([^"]{3,32})"',
+                                '"username"\s*:\s*"([^"]{3,32})"',
+                                '"displayName"\s*:\s*"([^"]{3,32})"',
+                                '"gamertag"\s*:\s*"([^"]{3,32})"',
+                                '"nickname"\s*:\s*"([^"]{3,32})"',
+                                '"player_name"\s*:\s*"([^"]{3,32})"'
+                            )
+                            foreach ($pattern in $patterns) {
+                                $matches = [regex]::Matches($content, $pattern)
+                                foreach ($m in $matches) {
+                                    Add-Account -Username $m.Groups[1].Value.Trim() -Score 12 -Source "R6S_SaveFile"
+                                }
+                            }
+                        }
+                    } catch {}
                 }
             }
         }
     }
 
-    # === METHOD 2: Ubisoft Connect cache - STRICT ===
-    $ubiCachePaths = @()
-    $ubiCachePaths += "$env:LOCALAPPDATA\Ubisoft Game Launcher\cache\users"
-    $ubiCachePaths += "$env:LOCALAPPDATA\Ubisoft Game Launcher\cache\profiles"  
-    $ubiCachePaths += "$env:LOCALAPPDATA\Ubisoft Game Launcher\cache\account"
-    $ubiCachePaths += "$env:APPDATA\Ubisoft Game Launcher\cache\users"
-    $ubiCachePaths += "$env:APPDATA\Ubisoft Game Launcher\cache\profiles"
-    $ubiCachePaths += "$env:APPDATA\Ubisoft Game Launcher\cache\account"
+    # === METHOD 2: Ubisoft Connect cache ===
+    $ubiPaths = @()
+    $ubiPaths += "$env:LOCALAPPDATA\Ubisoft Game Launcher"
+    $ubiPaths += "$env:APPDATA\Ubisoft Game Launcher"
     foreach ($u in $allUsers) {
-        $ubiCachePaths += "C:\Users\$u\AppData\Local\Ubisoft Game Launcher\cache\users"
-        $ubiCachePaths += "C:\Users\$u\AppData\Local\Ubisoft Game Launcher\cache\profiles"
-        $ubiCachePaths += "C:\Users\$u\AppData\Roaming\Ubisoft Game Launcher\cache\users"
-        $ubiCachePaths += "C:\Users\$u\AppData\Roaming\Ubisoft Game Launcher\cache\profiles"
+        $ubiPaths += "C:\Users\$u\AppData\Local\Ubisoft Game Launcher"
+        $ubiPaths += "C:\Users\$u\AppData\Roaming\Ubisoft Game Launcher"
     }
-    $ubiCachePaths = $ubiCachePaths | Sort-Object -Unique | Where-Object { Test-Path $_ }
+    $ubiPaths = $ubiPaths | Sort-Object -Unique | Where-Object { Test-Path $_ }
 
-    foreach ($ubiPath in $ubiCachePaths) {
-        if (-not $Silent) { Write-Host "    [i] Checking Ubisoft cache: $ubiPath" -ForegroundColor DarkGray }
-        $files = Get-ChildItem $ubiPath -Recurse -File -ErrorAction SilentlyContinue | 
-            Where-Object { $_.Length -lt 2MB -and $_.Extension -in '.json','.txt','.cache','.dat' }
-        foreach ($file in $files) {
-            try {
-                $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
-                if ($content -and $content.Length -gt 0) {
-                    # ONLY look for specific Ubisoft account fields - not generic "name" patterns
-                    $ubiPatterns = @(
-                        '"nameOnPlatform"\s*:\s*"([^"]{3,32})"',
-                        '"uplay_name"\s*:\s*"([^"]{3,32})"',
-                        '"username"\s*:\s*"([^"]{3,32})"',
-                        '"displayName"\s*:\s*"([^"]{3,32})"'
-                    )
-                    foreach ($pattern in $ubiPatterns) {
-                        $matches = [regex]::Matches($content, $pattern)
-                        foreach ($m in $matches) {
-                            $uname = $m.Groups[1].Value.Trim()
-                            Add-Account -Username $uname -Score 20 -Source "UbisoftCache_$($file.Name)"
+    foreach ($ubiBase in $ubiPaths) {
+        $cachePaths = @("$ubiBase\cache\users", "$ubiBase\cache\profiles", "$ubiBase\cache\account", "$ubiBase\cache")
+        foreach ($cachePath in $cachePaths) {
+            if (Test-Path $cachePath) {
+                if (-not $Silent) { Write-Host "    [i] Checking Ubisoft cache: $cachePath" -ForegroundColor DarkGray }
+                $files = Get-ChildItem $cachePath -Recurse -File -ErrorAction SilentlyContinue | 
+                    Where-Object { $_.Length -lt 2MB }
+                foreach ($file in $files) {
+                    try {
+                        $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+                        if ($content) {
+                            $patterns = @(
+                                '"nameOnPlatform"\s*:\s*"([^"]{3,32})"',
+                                '"uplay_name"\s*:\s*"([^"]{3,32})"',
+                                '"username"\s*:\s*"([^"]{3,32})"',
+                                '"displayName"\s*:\s*"([^"]{3,32})"'
+                            )
+                            foreach ($pattern in $patterns) {
+                                $matches = [regex]::Matches($content, $pattern)
+                                foreach ($m in $matches) {
+                                    Add-Account -Username $m.Groups[1].Value.Trim() -Score 15 -Source "UbiCache"
+                                }
+                            }
+                        }
+
+                        # For binary .dat files, try to extract strings
+                        if ($file.Extension -in '.dat','.cache','.db') {
+                            try {
+                                $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+                                $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+                                # Look for nameOnPlatform in binary data
+                                $binMatches = [regex]::Matches($text, 'nameOnPlatform.{0,5}([a-zA-Z0-9_.\-]{3,32})')
+                                foreach ($m in $binMatches) {
+                                    Add-Account -Username $m.Groups[1].Value.Trim() -Score 10 -Source "UbiCache_Binary"
+                                }
+                            } catch {}
+                        }
+                    } catch {}
+                }
+            }
+        }
+
+        # Check logs
+        $logPath = "$ubiBase\logs"
+        if (Test-Path $logPath) {
+            if (-not $Silent) { Write-Host "    [i] Checking Ubisoft logs: $logPath" -ForegroundColor DarkGray }
+            $logFiles = Get-ChildItem $logPath -File -ErrorAction SilentlyContinue | 
+                Where-Object { $_.Extension -in '.log','.txt' -and $_.Length -lt 5MB }
+            foreach ($file in $logFiles) {
+                try {
+                    $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+                    if ($content) {
+                        $loginMatches = [regex]::Matches($content, '(?i)login\s*(?:successful|success|completed).*?(?:user|name|account)\s*[:=]\s*"?([a-zA-Z0-9_.\-]{3,32})"?')
+                        foreach ($m in $loginMatches) {
+                            Add-Account -Username $m.Groups[1].Value.Trim() -Score 15 -Source "UbiLog"
+                        }
+                        $asMatches = [regex]::Matches($content, '(?i)(?:logged\s*in\s*as|signed\s*in\s*as|authenticated\s*as)\s*[:=]?\s*"?([a-zA-Z0-9_.\-]{3,32})"?')
+                        foreach ($m in $asMatches) {
+                            Add-Account -Username $m.Groups[1].Value.Trim() -Score 15 -Source "UbiLog"
                         }
                     }
-                }
-            } catch {}
-        }
-    }
-
-    # === METHOD 3: Ubisoft Connect logs - STRICT ===
-    $ubiLogPaths = @()
-    $ubiLogPaths += "$env:LOCALAPPDATA\Ubisoft Game Launcher\logs"
-    $ubiLogPaths += "$env:APPDATA\Ubisoft Game Launcher\logs"
-    foreach ($u in $allUsers) {
-        $ubiLogPaths += "C:\Users\$u\AppData\Local\Ubisoft Game Launcher\logs"
-        $ubiLogPaths += "C:\Users\$u\AppData\Roaming\Ubisoft Game Launcher\logs"
-    }
-    $ubiLogPaths = $ubiLogPaths | Sort-Object -Unique | Where-Object { Test-Path $_ }
-
-    foreach ($logPath in $ubiLogPaths) {
-        if (-not $Silent) { Write-Host "    [i] Checking Ubisoft logs: $logPath" -ForegroundColor DarkGray }
-        $logFiles = Get-ChildItem $logPath -File -ErrorAction SilentlyContinue | 
-            Where-Object { $_.Extension -in '.log','.txt' -and $_.Length -lt 5MB }
-        foreach ($file in $logFiles) {
-            try {
-                $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
-                if ($content) {
-                    # Look for explicit login success lines
-                    $loginMatches = [regex]::Matches($content, '(?i)login\s*(?:successful|success|completed).*?(?:user|name|account)\s*[:=]\s*"?([a-zA-Z0-9_.\-]{3,32})"?')
-                    foreach ($m in $loginMatches) {
-                        Add-Account -Username $m.Groups[1].Value.Trim() -Score 15 -Source "UbiLog_Login"
-                    }
-                    # Look for "Logged in as" patterns
-                    $asMatches = [regex]::Matches($content, '(?i)(?:logged\s*in\s*as|signed\s*in\s*as|authenticated\s*as)\s*[:=]?\s*"?([a-zA-Z0-9_.\-]{3,32})"?')
-                    foreach ($m in $asMatches) {
-                        Add-Account -Username $m.Groups[1].Value.Trim() -Score 15 -Source "UbiLog_Auth"
-                    }
-                }
-            } catch {}
-        }
-    }
-
-    # === METHOD 4: Ubisoft Connect settings.yml ===
-    $settingsPaths = @()
-    $settingsPaths += "$env:LOCALAPPDATA\Ubisoft Game Launcher\settings.yml"
-    $settingsPaths += "$env:APPDATA\Ubisoft Game Launcher\settings.yml"
-    $settingsPaths += "$env:LOCALAPPDATA\Ubisoft Game Launcher\settings.yaml"
-    $settingsPaths += "$env:APPDATA\Ubisoft Game Launcher\settings.yaml"
-    foreach ($u in $allUsers) {
-        $settingsPaths += "C:\Users\$u\AppData\Local\Ubisoft Game Launcher\settings.yml"
-        $settingsPaths += "C:\Users\$u\AppData\Roaming\Ubisoft Game Launcher\settings.yml"
-    }
-    $settingsPaths = $settingsPaths | Sort-Object -Unique | Where-Object { Test-Path $_ }
-
-    foreach ($settingsPath in $settingsPaths) {
-        if (-not $Silent) { Write-Host "    [i] Checking settings: $settingsPath" -ForegroundColor DarkGray }
-        try {
-            $content = Get-Content $settingsPath -Raw -ErrorAction SilentlyContinue
-            if ($content) {
-                $yamlMatches = [regex]::Matches($content, '(?im)^\s*username:\s*([a-zA-Z0-9_.\-]{3,32})\s*$')
-                foreach ($m in $yamlMatches) {
-                    Add-Account -Username $m.Groups[1].Value.Trim() -Score 20 -Source "UbiSettings_YAML"
-                }
+                } catch {}
             }
-        } catch {}
+        }
+
+        # Check settings
+        $settingsFiles = @("$ubiBase\settings.yml", "$ubiBase\settings.yaml")
+        foreach ($sf in $settingsFiles) {
+            if (Test-Path $sf) {
+                if (-not $Silent) { Write-Host "    [i] Checking settings: $sf" -ForegroundColor DarkGray }
+                try {
+                    $content = Get-Content $sf -Raw -ErrorAction SilentlyContinue
+                    if ($content) {
+                        $yamlMatches = [regex]::Matches($content, '(?im)^\s*username:\s*([a-zA-Z0-9_.\-]{3,32})\s*$')
+                        foreach ($m in $yamlMatches) {
+                            Add-Account -Username $m.Groups[1].Value.Trim() -Score 20 -Source "UbiSettings"
+                        }
+                    }
+                } catch {}
+            }
+        }
     }
 
-    # === METHOD 5: Registry - STRICT ===
+    # === METHOD 3: Registry ===
     $ubiRegPaths = @(
         "HKCU:\SOFTWARE\Ubisoft\Ubisoft Game Launcher",
         "HKLM:\SOFTWARE\Ubisoft\Ubisoft Game Launcher",
@@ -324,10 +318,9 @@ function Find-R6SAccounts {
                 foreach ($propName in $propNames) {
                     $val = $props.$propName
                     if ($val -and $val -is [string] -and $val.Length -ge 3 -and $val.Length -le 32) {
-                        # Only accept if the property NAME suggests it's a username
                         if ($propName -match '(?i)user|name|account|profile|player') {
                             if ($val -match '^[a-zA-Z0-9_.\-]+$') {
-                                Add-Account -Username $val -Score 12 -Source "Registry_$propName"
+                                Add-Account -Username $val -Score 12 -Source "Registry"
                             }
                         }
                     }
@@ -336,7 +329,7 @@ function Find-R6SAccounts {
         }
     }
 
-    # === METHOD 6: Windows Credential Manager ===
+    # === METHOD 4: Windows Credential Manager ===
     try {
         if (-not $Silent) { Write-Host "    [i] Checking Windows Credential Manager..." -ForegroundColor DarkGray }
         $creds = cmd /c "cmdkey /list" 2>$null
@@ -355,27 +348,26 @@ function Find-R6SAccounts {
         }
     } catch {}
 
-    # === METHOD 7: Steam userdata - STRICT (PersonaName only) ===
-    $steamUserdataPaths = @(
+    # === METHOD 5: Steam userdata ===
+    $steamPaths = @(
         "C:\Program Files (x86)\Steam\userdata",
         "C:\Program Files\Steam\userdata",
         "$env:USERPROFILE\Steam\userdata"
     )
     foreach ($u in $allUsers) {
-        $steamUserdataPaths += "C:\Users\$u\Steam\userdata"
+        $steamPaths += "C:\Users\$u\Steam\userdata"
     }
-    $steamUserdataPaths = $steamUserdataPaths | Sort-Object -Unique | Where-Object { Test-Path $_ }
+    $steamPaths = $steamPaths | Sort-Object -Unique | Where-Object { Test-Path $_ }
 
-    foreach ($sup in $steamUserdataPaths) {
-        if (-not $Silent) { Write-Host "    [i] Checking Steam userdata: $sup" -ForegroundColor DarkGray }
-        $steamIDFolders = Get-ChildItem $sup -Directory -ErrorAction SilentlyContinue
+    foreach ($sp in $steamPaths) {
+        if (-not $Silent) { Write-Host "    [i] Checking Steam userdata: $sp" -ForegroundColor DarkGray }
+        $steamIDFolders = Get-ChildItem $sp -Directory -ErrorAction SilentlyContinue
         foreach ($sid in $steamIDFolders) {
             $configPath = "$($sid.FullName)\config\localconfig.vdf"
             if (Test-Path $configPath) {
                 try {
                     $content = Get-Content $configPath -Raw -ErrorAction SilentlyContinue
                     if ($content) {
-                        # ONLY PersonaName - this is the Steam display name
                         $personaMatches = [regex]::Matches($content, '"PersonaName"\s*"([^"]{3,32})"')
                         foreach ($m in $personaMatches) {
                             Add-Account -Username $m.Groups[1].Value.Trim() -Score 15 -Source "Steam_PersonaName"
@@ -386,7 +378,7 @@ function Find-R6SAccounts {
         }
     }
 
-    # === METHOD 8: R6S Screenshot/Video metadata - STRICT ===
+    # === METHOD 6: R6S Media folders ===
     $mediaPaths = @()
     $mediaPaths += "$env:USERPROFILE\Videos\Rainbow Six - Siege"
     $mediaPaths += "$env:USERPROFILE\Pictures\Rainbow Six - Siege"
@@ -396,7 +388,6 @@ function Find-R6SAccounts {
     }
     foreach ($od in $oneDrivePaths) {
         $mediaPaths += "$od\Pictures\Rainbow Six - Siege"
-        $mediaPaths += "$od\Videos\Rainbow Six - Siege"
     }
     $mediaPaths = $mediaPaths | Sort-Object -Unique | Where-Object { Test-Path $_ }
 
@@ -404,37 +395,42 @@ function Find-R6SAccounts {
         if (-not $Silent) { Write-Host "    [i] Checking media folders: $mPath" -ForegroundColor DarkGray }
         try {
             $files = Get-ChildItem $mPath -Recurse -File -ErrorAction SilentlyContinue | 
-                Where-Object { $_.Extension -in '.png','.jpg','.jpeg','.bmp','.mp4','.avi','.mkv' }
+                Where-Object { $_.Extension -in '.png','.jpg','.jpeg','.bmp','.mp4' }
             foreach ($file in $files) {
                 $base = $file.BaseName
-                # Only process if filename contains "R6S", "Siege", or looks like a username capture
-                # R6S default: "Rainbow Six-YYYY.MM.DD-HH.MM.SS" - skip these
+                # Skip default R6S screenshot names
                 if ($base -match '^Rainbow Six-\d{4}\.\d{2}\.\d{2}') { continue }
                 if ($base -match '^R6S?_\d{4}') { continue }
 
-                # Look for username patterns in custom filenames
-                if ($base -match '(?i)(?:by_|from_|player_|user_|_by_|_from_)([a-zA-Z0-9_.\-]{3,32})') {
-                    Add-Account -Username $Matches[1] -Score 8 -Source "Media_Filename"
+                # Look for username patterns
+                if ($base -match '(?i)(?:by_|from_|player_|user_)([a-zA-Z0-9_.\-]{3,32})') {
+                    Add-Account -Username $Matches[1] -Score 8 -Source "Media"
                 }
-                # Or if the whole basename looks like a username (no date patterns)
                 elseif ($base -match '^[a-zA-Z][a-zA-Z0-9_.\-]{2,30}$' -and 
                         $base -notmatch '\d{4}' -and
                         $base -notmatch '^(screenshot|image|pic|photo|video|clip|recording)$') {
-                    Add-Account -Username $base -Score 5 -Source "Media_Filename"
+                    Add-Account -Username $base -Score 5 -Source "Media"
                 }
             }
         } catch {}
     }
 
-    # === FINAL FILTERING ===
-    # Build comprehensive blocklist of known false positives
+    # === FINAL FILTERING - BALANCED ===
+    # Blocklist: ONLY obvious non-usernames (app names, system terms, UI elements)
+    # Real usernames like "Zombi", "yoboytrippin", "Blood" should NOT be here
     $blocklist = @(
-        # App names / game titles
-        'Brawlhalla','Growtopia','MONOPOLY','Stadia','STEEP','Trackmania','UNO','Zombi',
-        'Classics','Live','Chinese','Dutch','English','French','German','Italian','Japanese',
-        'Korean','Portuguese','Russian','Spanish','Interlingua','Flashback','Drop05',
-        # UI/Settings terms
-        'ACCESSIBILITY','AccessibilityColorMode','adapter','AdaptiveRenderScalingTargetFPS',
+        # App/Game names (these are actual product names, not people)
+        'Brawlhalla','Growtopia','MONOPOLY','Stadia','STEEP','Trackmania','UNO',
+        'Classics','Live','Chinese','Dutch','English','French','German','Italian',
+        'Japanese','Korean','Portuguese','Russian','Spanish','Interlingua',
+        # UI navigation / app components
+        'app-game-properties','app-home-page','app-ingame-store','app-key-redemption',
+        'app-library','app-preferences','app-product-details','app-web-browser',
+        'auth-app','game-dl-mgr','gamer-profile','game-url-app','live-video-streaming',
+        'marketplace','mini-dl-app','news','notifications','rewards','social','store-app',
+        'splash-screen','spotlight','shellNav',
+        # Settings/UI terms (all caps or camelCase chains)
+        'ACCESSIBILITY','AccessibilityColorMode','AdaptiveRenderScalingTargetFPS',
         'ADSFullTiltBoostRampupDelay','ADSGamepadMultiplierUnit','ADSGamepadSensitivity',
         'AdvancedGamepadOptions','AimDownSights','AimDownSightsMouse','AntiAliasing',
         'AspectRatio','Atmospheric','AudioInputVoiceChatDevice','AudioOutputDevice',
@@ -477,47 +473,32 @@ function Find-R6SAccounts {
         'VoiceChatEnabled','VoiceChatMuteAll','VoiceChatPlaybackLevel','VoiceChatTeamOnly',
         'VoiceVolume','VSync','Vulkan','VulkanWhitelistedLayers','westeurope','westus',
         'windowed','WindowMode','XFactorAiming','YawSensitivity',
-        # Regions
+        # Region codes
         'af-south-1','ap-east-1','ap-northeast-1','ap-northeast-2','ap-northeast-3',
         'ap-south-1','ap-southeast-1','ap-southeast-2','australiaeast','brazilsouth',
         'ca-central-1','centralus','eastasia','eastus','japaneast','northeurope',
         'southafricanorth','southcentralus','southeastasia','uaenorth','westeurope','westus',
-        'us-east-1','us-east-2','us-west-1','us-west-2','eu-central-1','eu-north-1',
-        'eu-south-1','eu-west-1','eu-west-2','eu-west-3',
-        # Generic terms
-        'access_denied','AllLogsDisabled','app-game-properties','app-home-page',
-        'app-ingame-store','app-key-redemption','app-library','app-preferences',
-        'app-product-details','app-web-browser','auth-app','challenges','chromeAutofillStatesData',
-        'Country_Included_In_Rollout','custom.news.impression','DefaultPopulation','DESC',
-        'fileTypePolicies','game-dl-mgr','gamer-profile','game-url-app','GeneralPopulation',
-        'GroupL','host_name','hyphens-data','live-video-streaming','marketplace','mini-dl-app',
-        'news','newsTilesDisplayed','nonDevelopers','None','notifications','NULL',
+        'us-east-1','us-east-2','us-west-1','us-west-2',
+        # System/data terms
+        'access_denied','AllLogsDisabled','chromeAutofillStatesData',
+        'Country_Included_In_Rollout','crl-set-','custom.news.impression',
+        'DefaultPopulation','DESC','fileTypePolicies','GeneralPopulation','GroupL',
+        'host_name','hyphens-data','newsTilesDisplayed','nonDevelopers','None','NULL',
         'OneClickBuy_Flow1_uApp','OneClickPlay_Eligible','opt_out','Performance',
         'performance.cls','performance.fcp','performance.lcp','performance.tti',
         'pkiMetadata','player.plhttps','Pop1','Premium','previews_v1','PRIMARY','promotab',
-        'Promotabs','QV0JMOls6VhUVh1hGlxN5rC1MXAPJ91K','RememberDeviceAccounts','rev-share-app',
-        'rewards','safetyTips','shellNav','social','splash-screen','spotlight',
-        'sslErrorAssistant','store-app','TABLE','tbyb','time','trustToken','tvn.plC',
-        'upn-account','US_Uplay_PC','User_Live','VARCHAR','Videos','Violence','WidevineCdm',
-        'yoboytrippin','Yoboytrippin..','zxcvbnData',
-        # File extensions and system terms
-        'exe','dll','sys','tmp','temp','log','ini','cfg','json','xml','yml','yaml',
-        'bat','cmd','ps1','vbs','js','jar','py','scr','com','txt','doc','pdf','jpg',
-        'png','gif','mp4','avi','mkv',
-        # Common words
+        'Promotabs','QV0JMOls6VhUVh1hGlxN5rC1MXAPJ91K','RememberDeviceAccounts',
+        'rev-share-app','safetyTips','sslErrorAssistant','TABLE','tbyb','time',
+        'trustToken','tvn.plC','upn-account','US_Uplay_PC','User_Live','VARCHAR',
+        'Videos','Violence','WidevineCdm','zxcvbnData',
+        # Generic single words that aren't usernames
         'admin','test','guest','default','unknown','anonymous','player','gamer',
         'name','account','profile','login','password','pass','key','code','id','num',
         'no','yes','ok','cancel','error','warning','info','debug','trace','file',
         'folder','path','dir','root','home','cache','data','db','sql','api','url',
         'uri','ip','mac','host','server','client','pc','computer','desktop','laptop',
         'mobile','phone','tablet','device','system','os','win','windows','microsoft',
-        'google','apple','linux','ubuntu','debian','fedora','arch','manjaro',
-        'all','and','are','based','below','for','from','game','going','hash','index',
-        'indication','info','key','latency','layers','let','library','like','list',
-        'looked','mapped','metrics','minimum','mode','monitor','mute','night','not',
-        'only','options','pick','ping','push','range','reports','resolution','rumble',
-        'select','separated','set','shadow','sharpness','talk','the','time','usage',
-        'used','vertical','video','view','want','which','will','with','work','you'
+        'google','apple','linux','all','and','are','for','from','game','the','you'
     )
 
     $blocklistLower = $blocklist | ForEach-Object { $_.ToLower() }
@@ -527,10 +508,27 @@ function Find-R6SAccounts {
         $score = $_.Score
         $sources = $_.Sources
 
-        # Must have meaningful confidence (require higher score OR multiple sources)
-        if ($score -lt 8 -and $sources.Count -lt 2) { return $false }
+        # === ACCEPTANCE RULES ===
+        # Rule 1: High-confidence source (R6S save file, Ubisoft cache with nameOnPlatform, etc.)
+        $highConfidenceSources = $sources | Where-Object { 
+            $_ -match 'R6S_SaveFile|UbiCache|UbiLog|UbiSettings|Registry|CredentialManager|Steam_PersonaName' 
+        }
 
-        # Must not be in blocklist (case-insensitive)
+        # Rule 2: Multiple independent sources found the same name
+        $multiSource = ($sources.Count -ge 2)
+
+        # Rule 3: Decent score from any source
+        $decentScore = ($score -ge 8)
+
+        # Rule 4: Very high score from single source
+        $highScore = ($score -ge 15)
+
+        # Must pass at least one acceptance rule
+        $accepted = ($highConfidenceSources.Count -gt 0) -or $multiSource -or $decentScore -or $highScore
+        if (-not $accepted) { return $false }
+
+        # === REJECTION RULES ===
+        # Blocklist check (case-insensitive)
         if ($blocklistLower -contains $acc.ToLower()) { return $false }
 
         # Must not be all numbers
@@ -549,14 +547,17 @@ function Find-R6SAccounts {
         # Must not be a version number
         if ($acc -match '^\d+\.\d+\.\d+') { return $false }
 
-        # Must not be a URL fragment
+        # Must not contain URL fragments
         if ($acc -match 'https?|www\.|\.com|\.net|\.org') { return $false }
 
         # Must not contain spaces
         if ($acc -match '\s') { return $false }
 
-        # Must not end with special chars (common in truncated data)
-        if ($acc -match '[._\-]$') { return $false }
+        # Must not end with dots (truncation artifact)
+        if ($acc -match '\.+$') { return $false }
+
+        # Must not be a random hash/ID
+        if ($acc -match '^[a-zA-Z0-9]{20,}$' -and $acc -notmatch '[_.\-]') { return $false }
 
         return $true
     } | Sort-Object Score -Descending | Select-Object -ExpandProperty Username -Unique
@@ -568,7 +569,7 @@ function Find-R6SAccounts {
 # ========== HEADER ==========
 $headerText = @"
 ================================================================================
-  SYSTEM INTEGRITY AUDIT REPORT v6.5
+  SYSTEM INTEGRITY AUDIT REPORT v6.5.1
 ================================================================================
   Generated:  $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
   Computer:  $env:COMPUTERNAME
@@ -1008,6 +1009,7 @@ if ($adsFiles.Count -gt 0) { Write-Alert "$($adsFiles.Count) alternate data stre
 Write-Log "ADS STREAMS ($($adsFiles.Count))" $adsFiles "ADS_Files"
 
 # ========== SECTION 19: RAINBOW SIX SIEGE STATS ==========
+# ========== SECTION 19: RAINBOW SIX SIEGE STATS ==========
 Write-Section "19: RAINBOW SIX SIEGE PLAYER STATS (STATS.CC)"
 
 if (-not $Silent) { Write-Host "`n[*] Scanning for Rainbow Six Siege accounts..." -ForegroundColor Cyan }
@@ -1037,11 +1039,9 @@ if ($r6sAccounts.Count -eq 0) {
             Start-Sleep -Seconds 1
         } catch {
             if (-not $Silent) { Write-Host "  [!] Could not open browser for '$name'" -ForegroundColor Yellow }
-            Add-Content -Path $LogFile -Value "  [Browser open failed for $name]" -ErrorAction SilentlyContinue
         }
     }
 
-    # Export to CSV with URLs
     $r6sAccounts | ForEach-Object { 
         [PSCustomObject]@{ 
             Username = $_
@@ -1152,7 +1152,7 @@ if ($UploadURL) {
 # ========== CONSOLE OUTPUT ==========
 if (-not $Silent) {
     Write-Host "`n================================================================" -ForegroundColor Green
-    Write-Host "  AUDIT COMPLETE v6.5" -ForegroundColor Green
+    Write-Host "  AUDIT COMPLETE v6.5.1" -ForegroundColor Green
     Write-Host "================================================================" -ForegroundColor Green
     Write-Host "  Windows: $installDateStr ($daysInstall days)" -ForegroundColor Cyan
     Write-Host "  Devices: $($allPnp.Count) total PNP | Prefetch: $($prefetch.Count) files" -ForegroundColor Cyan
