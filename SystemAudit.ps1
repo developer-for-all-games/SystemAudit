@@ -527,7 +527,8 @@ function Find-R6SAccounts {
 
     return $filtered
 }
-    
+
+}    
 
     $allUsers = @()
     try { $allUsers = Get-ChildItem "C:\Users" -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name } catch {}
@@ -962,7 +963,7 @@ function Find-R6SAccounts {
 
     return $filtered
 }
-
+}
 
 # ========== HEADER ==========
 $headerText = @"
