@@ -1,7 +1,8 @@
 #Requires -RunAsAdministrator
 # =============================================================================
-#  SYSTEM INTEGRITY AUDIT SCRIPT v6.5.1
+#  SYSTEM INTEGRITY AUDIT SCRIPT v6.6.0
 #  Enhanced Forensics Suite with AI Bot Detection & R6S Stats Integration
+#  Credits: Original by developer-for-all-games | R6S Lookup inspired by halfskid.net / lain.wtf
 #  Repo: https://github.com/developer-for-all-games/SystemAudit
 #  Run: irm "https://raw.githubusercontent.com/developer-for-all-games/SystemAudit/main/SystemAudit.ps1" | iex
 # =============================================================================
@@ -17,7 +18,10 @@ param(
     [string]$GamePaths = $null,
     [switch]$ZipResults,
     [string]$UploadURL = $null,
-    [switch]$NoEmail
+    [switch]$NoEmail,
+    [switch]$OpenStats,           # NEW: Open stats.cc pages for discovered accounts
+    [switch]$OpenForensicTools,   # NEW: Open forensic tool URLs
+    [switch]$OpenSystemPaths      # NEW: Open system forensic paths
 )
 
 # ========== CONFIG LOADER ==========
@@ -77,6 +81,33 @@ function Write-Warn {
     Add-Content -Path $LogFile -Value "`nWARNING: $Message" -ErrorAction SilentlyContinue
 }
 
+# ========== NEW: UTILITY FUNCTIONS (from halfskid.net / lain.wtf) ==========
+function Open-URL {
+    param([string]$url)
+    if (-not $Silent) { Write-Host "  [>] Opening $url" -ForegroundColor Yellow }
+    try { Start-Process $url } catch { Write-Warn "Could not open URL: $url" }
+}
+
+function Open-Path {
+    param([string]$path)
+    if (Test-Path $path) {
+        if (-not $Silent) { Write-Host "  [>] Opening path: $path" -ForegroundColor Yellow }
+        Start-Process $path
+    } else {
+        if (-not $Silent) { Write-Host "  [!] Path not found: $path" -ForegroundColor Red }
+    }
+}
+
+function Open-Reg {
+    param([string]$regPath)
+    if (-not $Silent) { Write-Host "  [>] Opening Registry: $regPath" -ForegroundColor Yellow }
+    try {
+        Start-Process "regedit.exe"
+        Start-Sleep -Seconds 1
+        Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit" -Name "LastKey" -Value $regPath
+    } catch { Write-Warn "Could not open registry path: $regPath" }
+}
+
 # ========== HELPER: Get OneDrive Path ==========
 function Get-OneDrivePath {
     $oneDrivePaths = @()
@@ -105,7 +136,7 @@ function Get-OneDrivePath {
     return $oneDrivePaths | Sort-Object -Unique
 }
 
-# ========== R6S ACCOUNT DISCOVERY v3.1 - Balanced ==========
+# ========== R6S ACCOUNT DISCOVERY v3.2 - Enhanced with halfskid.net approach ==========
 function Find-R6SAccounts {
     $foundAccounts = @()
 
@@ -140,7 +171,7 @@ function Find-R6SAccounts {
     $oneDrivePaths += "$env:USERPROFILE\OneDrive"
     $oneDrivePaths = $oneDrivePaths | Sort-Object -Unique
 
-    # === METHOD 1: R6S Save Folder ===
+    # === METHOD 1: R6S Save Folder (Enhanced - now also checks GUID folder names as potential usernames) ===
     $r6sPaths = @()
     $r6sPaths += "$env:USERPROFILE\Documents\My Games\Rainbow Six - Siege"
     foreach ($u in $allUsers) {
@@ -535,7 +566,7 @@ function Find-R6SAccounts {
         if ($acc -match '^[0-9]+$') { return $false }
 
         # Must not be a single repeated character
-        if ($acc -match '^(.)(\1)+$') { return $false }
+        if ($acc -match '^(.)\1+$') { return $false }
 
         # Must not contain only special chars
         if ($acc -match '^[._\-]+$') { return $false }
@@ -557,7 +588,7 @@ function Find-R6SAccounts {
         if ($acc -match '\.+$') { return $false }
 
         # Must not be a random hash/ID
-        if ($acc -match '^[a-zA-Z0-9]{20,}$' -and $acc -notmatch '[_.\-]') { return $false }
+        if ($acc -match '^[a-zA-Z0-9]{20,}$' -and $acc -notmatch '[._\-]') { return $false }
 
         return $true
     } | Sort-Object Score -Descending | Select-Object -ExpandProperty Username -Unique
@@ -569,7 +600,7 @@ function Find-R6SAccounts {
 # ========== HEADER ==========
 $headerText = @"
 ================================================================================
-  SYSTEM INTEGRITY AUDIT REPORT v6.5.1
+  SYSTEM INTEGRITY AUDIT REPORT v6.6.0
 ================================================================================
   Generated:  $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
   Computer:  $env:COMPUTERNAME
@@ -711,6 +742,7 @@ try {
 }
 Write-Log "MONITORS ($($monitors.Count))" $monitors "Monitors"
 
+
 # ========== SECTION 5: PREFETCH ==========
 Write-Section "5: PREFETCH FORENSICS"
 
@@ -820,6 +852,7 @@ Write-Log "PYTHON LIBRARIES ($($pythonSusFiles.Count))" $pythonSusFiles "Python_
 Write-Log "MACRO SCRIPTS ($($macroFiles.Count))" $macroFiles "Macro_Scripts"
 Write-Log "INTERCEPTION DRIVER" $interceptionDriver "Interception_Driver"
 Write-Log "AUTO TASKS ($($autoTasks.Count))" $autoTasks "Suspicious_Auto_Tasks"
+
 
 # ========== SECTION 7: REGISTRY ==========
 Write-Section "7: REGISTRY PERSISTENCE"
@@ -942,6 +975,7 @@ $susGameFiles = $gameFiles | Where-Object { $name = (Split-Path $_.FullName -Lea
 if ($susGameFiles.Count -gt 0) { Write-Alert "$($susGameFiles.Count) suspicious files in game directories!" }
 Write-Log "SUSPICIOUS GAME FILES ($($susGameFiles.Count))" $susGameFiles "Suspicious_Game_Files"
 
+
 # ========== SECTION 15: THREAT HUNT ==========
 Write-Section "15: SYSTEM WIDE THREAT HUNT"
 
@@ -1007,158 +1041,3 @@ foreach ($path in $scanPaths) {
 $adsFiles = $adsFiles | Where-Object { $_.StreamName -ne '' -and $_.StreamName -notmatch '^\s*$' } | Sort-Object FileName, StreamName -Unique
 if ($adsFiles.Count -gt 0) { Write-Alert "$($adsFiles.Count) alternate data streams found!" }
 Write-Log "ADS STREAMS ($($adsFiles.Count))" $adsFiles "ADS_Files"
-
-# ========== SECTION 19: RAINBOW SIX SIEGE STATS ==========
-# ========== SECTION 19: RAINBOW SIX SIEGE STATS ==========
-Write-Section "19: RAINBOW SIX SIEGE PLAYER STATS (STATS.CC)"
-
-if (-not $Silent) { Write-Host "`n[*] Scanning for Rainbow Six Siege accounts..." -ForegroundColor Cyan }
-
-$r6sAccounts = @(Find-R6SAccounts)
-
-Add-Content -Path $LogFile -Value "`n-----------------" -ErrorAction SilentlyContinue
-Add-Content -Path $LogFile -Value "R6S Account Discovery Results:" -ErrorAction SilentlyContinue
-Add-Content -Path $LogFile -Value "-----------------" -ErrorAction SilentlyContinue
-
-if ($r6sAccounts.Count -eq 0) {
-    Add-Content -Path $LogFile -Value "No Rainbow Six Siege accounts found on this system." -ErrorAction SilentlyContinue
-    Write-Warn "No Rainbow Six Siege accounts found on this system."
-} else {
-    if (-not $Silent) { 
-        Write-Host "[+] Found $($r6sAccounts.Count) verified account(s): $($r6sAccounts -join ', ')" -ForegroundColor Green 
-    }
-
-    foreach ($name in $r6sAccounts) {
-        Add-Content -Path $LogFile -Value "Account: $name" -ErrorAction SilentlyContinue
-
-        $url = "https://stats.cc/siege/$name"
-        if (-not $Silent) { Write-Host "  -> Opening stats for '$name' ..." -ForegroundColor Blue }
-
-        try {
-            Start-Process $url
-            Start-Sleep -Seconds 1
-        } catch {
-            if (-not $Silent) { Write-Host "  [!] Could not open browser for '$name'" -ForegroundColor Yellow }
-        }
-    }
-
-    $r6sAccounts | ForEach-Object { 
-        [PSCustomObject]@{ 
-            Username = $_
-            StatsCC_URL = "https://stats.cc/siege/$_"
-            Discovered = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-        } 
-    } | Export-Csv -Path "$CsvFolder\R6S_Usernames.csv" -NoTypeInformation -Force -ErrorAction SilentlyContinue
-}
-Write-Section "FINAL SUMMARY"
-
-# Build summary safely
-$installDateStr = if ($osInfo.'Install Date') { $osInfo.'Install Date' } else { "Unknown" }
-$uptimeStr = if ($osInfo.'System Uptime') { $osInfo.'System Uptime' } else { "Unknown" }
-$daysInstall = if ($osInfo.'Days Since Install') { $osInfo.'Days Since Install'.ToString() } else { "?" }
-
-$summaryText = @"
-AUDIT COMPLETE: $(Get-Date)
-Log: $LogFile
-CSV: $CsvFolder
-Prefetch: $PrefetchFolder
-
-WINDOWS INSTALL DATE: $installDateStr ($daysInstall days ago)
-SYSTEM UPTIME: $uptimeStr
-
-DEVICES:
-  USB: $($pluggedUSB.Count) | HID: $($hidDevices.Count) | Audio: $($audioDevices.Count)
-  Monitors: $($monitors.Count) | Storage: $($storage.Count) | Network: $($netAdapters.Count)
-  Bluetooth: $($bluetooth.Count) | PCIe/DMA: $($pcieDevices.Count) | Serial: $($serialPorts.Count)
-  Total PNP: $($allPnp.Count)
-
-FORENSICS:
-  Prefetch: $($prefetch.Count) | USB History: $($usb.Count) | Software: $($software.Count)
-  Processes: $($procs.Count) | Connections: $($net.Count) | Tasks: $($tasks.Count)
-
-THREATS:
-  Suspicious Prefetch: $($susPrefetch.Count) | Weird Names: $($weirdPrefetch.Count)
-  AI Bot Processes: $($aiBotProcesses.Count) | Python Libs: $($pythonSusFiles.Count)
-  Macro Scripts: $($macroFiles.Count) | Suspicious Procs: $($susProcs.Count)
-  Suspicious Files: $($foundFiles.Count) | Game Files: $($gameFiles.Count)
-  Suspicious Game: $($susGameFiles.Count) | Unsigned Drivers: $($unsignedDrivers.Count)
-  WMI Bindings: $($wmiBindings.Count) | ADS Streams: $($adsFiles.Count)
-
-RAINBOW SIX SIEGE:
-  Accounts Discovered: $($r6sAccounts.Count)
-  Accounts: $($r6sAccounts -join ', ')
-  Stats.cc Pages Opened: $($r6sAccounts.Count)
-"@
-Add-Content -Path $LogFile -Value "`n$summaryText" -ErrorAction SilentlyContinue
-
-# ========== ZIP ==========
-$zipPath = "$OutputPath\Audit_$Timestamp.zip"
-if ($ZipResults) {
-    try {
-        Compress-Archive -Path $LogFile, $CsvFolder, $PrefetchFolder -DestinationPath $zipPath -Force -ErrorAction Stop
-        Write-Log "ZIP ARCHIVE CREATED" "Location: $zipPath"
-        if (-not $Silent) { Write-Host "ZIP: $zipPath" -ForegroundColor Green }
-    } catch {
-        Write-Log "ZIP FAILED" $_.Exception.Message
-    }
-}
-
-# ========== EMAIL ==========
-if ($EmailTo -and $EmailFrom -and $EmailPassword -and -not $NoEmail) {
-    try {
-        $subject = "System Audit - $env:COMPUTERNAME - $Timestamp"
-        $body = "Audit for $env:COMPUTERNAME`n`n$summaryText"
-        $securePassword = ConvertTo-SecureString $EmailPassword -AsPlainText -Force
-        $credential = New-Object System.Management.Automation.PSCredential($EmailFrom, $securePassword)
-
-        $params = @{
-            SmtpServer = $SMTPServer
-            Port = $SMTPPort
-            UseSsl = $true
-            Credential = $credential
-            From = $EmailFrom
-            To = $EmailTo
-            Subject = $subject
-            Body = $body
-        }
-
-        if ($ZipResults -and (Test-Path $zipPath)) {
-            $params.Attachments = $zipPath
-        } elseif (Test-Path $LogFile) {
-            $params.Attachments = $LogFile
-        }
-
-        Send-MailMessage @params -ErrorAction Stop
-        Write-Log "EMAIL SENT" "To: $EmailTo"
-        if (-not $Silent) { Write-Host "Email sent to $EmailTo!" -ForegroundColor Green }
-    } catch {
-        Write-Log "EMAIL FAILED" $_.Exception.Message
-        if (-not $Silent) { Write-Host "Email failed: $($_.Exception.Message)" -ForegroundColor Red }
-    }
-}
-
-# ========== UPLOAD ==========
-if ($UploadURL) {
-    try {
-        $uploadFile = if ($ZipResults -and (Test-Path $zipPath)) { $zipPath } else { $LogFile }
-        Invoke-RestMethod -Uri $UploadURL -Method Post -InFile $uploadFile -Headers @{"Content-Type"="application/octet-stream"} -ErrorAction Stop
-        Write-Log "UPLOAD SUCCESS" $UploadURL
-        if (-not $Silent) { Write-Host "Uploaded!" -ForegroundColor Green }
-    } catch {
-        Write-Log "UPLOAD FAILED" $_.Exception.Message
-    }
-}
-
-# ========== CONSOLE OUTPUT ==========
-if (-not $Silent) {
-    Write-Host "`n================================================================" -ForegroundColor Green
-    Write-Host "  AUDIT COMPLETE v6.5.1" -ForegroundColor Green
-    Write-Host "================================================================" -ForegroundColor Green
-    Write-Host "  Windows: $installDateStr ($daysInstall days)" -ForegroundColor Cyan
-    Write-Host "  Devices: $($allPnp.Count) total PNP | Prefetch: $($prefetch.Count) files" -ForegroundColor Cyan
-    Write-Host "  AI Bots: $($aiBotProcesses.Count) detected | Threats: $($susProcs.Count + $foundFiles.Count + $susGameFiles.Count)" -ForegroundColor Cyan
-    Write-Host "  R6S Accounts: $($r6sAccounts.Count) found | Stats.cc pages opened" -ForegroundColor Cyan
-    Write-Host "  Log: $LogFile" -ForegroundColor Cyan
-    if ($ZipResults -and (Test-Path $zipPath)) { Write-Host "  ZIP: $zipPath" -ForegroundColor Cyan }
-    Write-Host "================================================================" -ForegroundColor Green
-}
