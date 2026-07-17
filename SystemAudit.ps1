@@ -1,6 +1,6 @@
 #Requires -RunAsAdministrator
 # =============================================================================
-#  SYSTEM INTEGRITY AUDIT SCRIPT v6.2
+#  SYSTEM INTEGRITY AUDIT SCRIPT v6.3
 #  Enhanced Forensics Suite with AI Bot Detection & R6S Stats Integration
 #  Repo: https://github.com/developer-for-all-games/SystemAudit
 #  Run: irm "https://raw.githubusercontent.com/developer-for-all-games/SystemAudit/main/SystemAudit.ps1" | iex
@@ -77,94 +77,7 @@ function Write-Warn {
     Add-Content -Path $LogFile -Value "`nWARNING: $Message" -ErrorAction SilentlyContinue
 }
 
-# ========== R6S STATS LOOKUP FUNCTIONS ==========
-function Get-R6SPlayerStats {
-    param([string]$Username)
-
-    $results = @()
-    $platforms = @("pc", "xboxone", "ps4")
-
-    foreach ($plat in $platforms) {
-        $statsFound = $false
-
-        # Try r6.tracker.network API (most reliable)
-        try {
-            $url = "https://api.tracker.gg/api/v2/r6siege/standard/profile/$plat/$Username"
-            $response = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 10 -ErrorAction Stop
-
-            if ($response.data -and $response.data.segments) {
-                $overview = $response.data.segments | Where-Object { $_.type -eq "overview" } | Select-Object -First 1
-                $ranked = $response.data.segments | Where-Object { $_.type -eq "ranked" } | Select-Object -First 1
-
-                if ($overview) {
-                    $stats = [PSCustomObject]@{
-                        Username        = $Username
-                        Platform        = $plat
-                        Level           = if ($overview.stats.level.value) { $overview.stats.level.value } else { "N/A" }
-                        Rank            = if ($ranked.stats.rankLevel.metadata.name) { $ranked.stats.rankLevel.metadata.name } else { "N/A" }
-                        MMR             = if ($ranked.stats.rating.value) { $ranked.stats.rating.value } else { "N/A" }
-                        Kills           = if ($overview.stats.kills.value) { $overview.stats.kills.value } else { "N/A" }
-                        Deaths          = if ($overview.stats.deaths.value) { $overview.stats.deaths.value } else { "N/A" }
-                        KD              = if ($overview.stats.kd.value) { [math]::Round($overview.stats.kd.value, 2) } else { "N/A" }
-                        Wins            = if ($overview.stats.wins.value) { $overview.stats.wins.value } else { "N/A" }
-                        Losses          = if ($overview.stats.losses.value) { $overview.stats.losses.value } else { "N/A" }
-                        WinRate         = if ($overview.stats.wlPercentage.value) { "$([math]::Round($overview.stats.wlPercentage.value, 1))%" } else { "N/A" }
-                        Headshots       = if ($overview.stats.headshots.value) { $overview.stats.headshots.value } else { "N/A" }
-                        TimePlayed      = if ($overview.stats.timePlayed.value) { $overview.stats.timePlayed.displayValue } else { "N/A" }
-                        ProfileURL      = "https://r6.tracker.network/profile/$plat/$Username"
-                        API_Status      = "Success (Tracker)"
-                        LastUpdated     = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                    }
-                    $results += $stats
-                    $statsFound = $true
-                }
-            }
-        } catch {
-            # Try stats.cc API as fallback
-            try {
-                $url2 = "https://stats.cc/api/r6s/player/$plat/$Username"
-                $response2 = Invoke-RestMethod -Uri $url2 -Method Get -TimeoutSec 10 -ErrorAction Stop
-
-                if ($response2 -and $response2.data) {
-                    $d = $response2.data
-                    $stats = [PSCustomObject]@{
-                        Username        = $Username
-                        Platform        = $plat
-                        Level           = if ($d.level) { $d.level } else { "N/A" }
-                        Rank            = if ($d.rank) { $d.rank } else { "N/A" }
-                        MMR             = if ($d.mmr) { $d.mmr } else { "N/A" }
-                        Kills           = if ($d.kills) { $d.kills } else { "N/A" }
-                        Deaths          = if ($d.deaths) { $d.deaths } else { "N/A" }
-                        KD              = if ($d.kd) { $d.kd } else { "N/A" }
-                        Wins            = if ($d.wins) { $d.wins } else { "N/A" }
-                        Losses          = if ($d.losses) { $d.losses } else { "N/A" }
-                        WinRate         = if ($d.winRate) { $d.winRate } else { "N/A" }
-                        Headshots       = if ($d.headshots) { $d.headshots } else { "N/A" }
-                        TimePlayed      = if ($d.timePlayed) { $d.timePlayed } else { "N/A" }
-                        ProfileURL      = "https://stats.cc/player/$plat/$Username"
-                        API_Status      = "Success (stats.cc)"
-                        LastUpdated     = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                    }
-                    $results += $stats
-                    $statsFound = $true
-                }
-            } catch {
-                # Try Ubisoft stats API as last resort
-                try {
-                    $url3 = "https://public-ubiservices.ubi.com/v3/profiles?nameOnPlatform=$Username&platformType=$plat"
-                    # This requires auth, so it will likely fail but worth trying
-                } catch {
-                    # Silently continue
-                }
-            }
-        }
-
-        if ($statsFound) { break }  # If found on one platform, don't check others for same account
-    }
-
-    return $results
-}
-
+# ========== R6S ACCOUNT DISCOVERY ==========
 function Find-R6SAccounts {
     $accounts = @()
     $foundUsernames = @{}  # Hash table to track confidence scores
@@ -597,7 +510,7 @@ function Find-R6SAccounts {
 # ========== HEADER ==========
 $headerText = @"
 ================================================================================
-  SYSTEM INTEGRITY AUDIT REPORT v6.2
+  SYSTEM INTEGRITY AUDIT REPORT v6.3
 ================================================================================
   Generated:  $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
   Computer:  $env:COMPUTERNAME
@@ -1037,116 +950,32 @@ if ($adsFiles.Count -gt 0) { Write-Alert "$($adsFiles.Count) alternate data stre
 Write-Log "ADS STREAMS ($($adsFiles.Count))" $adsFiles "ADS_Files"
 
 # ========== SECTION 19: RAINBOW SIX SIEGE STATS ==========
-Write-Section "19: RAINBOW SIX SIEGE PLAYER STATS"
+Write-Section "19: RAINBOW SIX SIEGE PLAYER STATS (STATS.CC)"
 
 if (-not $Silent) { Write-Host "`n[*] Scanning for Rainbow Six Siege accounts..." -ForegroundColor Cyan }
 
-$r6sAccounts = Find-R6SAccounts
+$r6sAccounts = @(Find-R6SAccounts | Sort-Object | Get-Unique)
 
-# Build formatted R6S stats text for log
-$r6sStatsText = @"
-
-========================================================================
-RAINBOW SIX SIEGE PLAYER STATS
-========================================================================
-
-"@
+Add-Content -Path $LogFile -Value "`n-----------------" -ErrorAction SilentlyContinue
+Add-Content -Path $LogFile -Value "`nR6 Usernames:" -ErrorAction SilentlyContinue
 
 if ($r6sAccounts.Count -eq 0) {
-    $r6sStatsText += "No Rainbow Six Siege accounts found on this system.`n"
-    $r6sStatsText += "Checked: R6S save data, Ubisoft Connect registry, browser data, Discord cache, media folders.`n"
+    Add-Content -Path $LogFile -Value "No Rainbow Six Siege accounts found on this system." -ErrorAction SilentlyContinue
     Write-Warn "No Rainbow Six Siege accounts found on this system."
-    Write-Log "R6S ACCOUNTS" "No accounts discovered."
 } else {
     if (-not $Silent) { Write-Host "[+] Found $($r6sAccounts.Count) potential account(s): $($r6sAccounts -join ', ')" -ForegroundColor Green }
 
-    $allR6SStats = @()
-    $firstAccount = $true
+    foreach ($name in $r6sAccounts) {
+        Add-Content -Path $LogFile -Value $name -ErrorAction SilentlyContinue
 
-    foreach ($account in $r6sAccounts) {
-        if (-not $Silent) { Write-Host "[*] Querying stats for: $account ..." -ForegroundColor Cyan }
-
-        $stats = Get-R6SPlayerStats -Username $account
-
-        if ($stats -and $stats.Count -gt 0) {
-            foreach ($stat in $stats) {
-                if (-not $firstAccount) {
-                    $r6sStatsText += "--------------------------------------------`n`n"
-                }
-                $firstAccount = $false
-
-                $r6sStatsText += "Username: $($stat.Username)`n"
-                $r6sStatsText += "Platform: $($stat.Platform.ToUpper())`n"
-                $r6sStatsText += "Level: $($stat.Level)`n"
-                $r6sStatsText += "Rank: $($stat.Rank)`n"
-                $r6sStatsText += "MMR: $($stat.MMR)`n"
-                $r6sStatsText += "KD: $($stat.KD)`n"
-                $r6sStatsText += "Win Rate: $($stat.WinRate)`n"
-                $r6sStatsText += "Wins: $($stat.Wins)`n"
-                $r6sStatsText += "Losses: $($stat.Losses)`n"
-                $r6sStatsText += "Kills: $($stat.Kills)`n"
-                $r6sStatsText += "Deaths: $($stat.Deaths)`n"
-                $r6sStatsText += "Headshots: $($stat.Headshots)`n"
-                $r6sStatsText += "Time Played: $($stat.TimePlayed)`n"
-                $r6sStatsText += "Profile: $($stat.ProfileURL)`n"
-                $r6sStatsText += "Status: $($stat.API_Status)`n"
-                $r6sStatsText += "`n"
-
-                $allR6SStats += $stat
-                if (-not $Silent) { Write-Host "[+] Found stats for $account on $($stat.Platform)" -ForegroundColor Green }
-            }
-        } else {
-            if (-not $firstAccount) {
-                $r6sStatsText += "--------------------------------------------`n`n"
-            }
-            $firstAccount = $false
-
-            $r6sStatsText += "Username: $account`n"
-            $r6sStatsText += "Platform: N/A`n"
-            $r6sStatsText += "Level: N/A`n"
-            $r6sStatsText += "Rank: N/A`n"
-            $r6sStatsText += "MMR: N/A`n"
-            $r6sStatsText += "KD: N/A`n"
-            $r6sStatsText += "Win Rate: N/A`n"
-            $r6sStatsText += "Status: Not Found`n"
-            $r6sStatsText += "Search: https://r6.tracker.network/search?platform=pc&query=$account`n"
-            $r6sStatsText += "`n"
-
-            $allR6SStats += [PSCustomObject]@{
-                Username = $account
-                Platform = "N/A"
-                Level = "N/A"
-                Rank = "N/A"
-                MMR = "N/A"
-                KD = "N/A"
-                WinRate = "N/A"
-                Wins = "N/A"
-                Losses = "N/A"
-                Kills = "N/A"
-                Deaths = "N/A"
-                Headshots = "N/A"
-                TimePlayed = "N/A"
-                ProfileURL = "https://r6.tracker.network/search?platform=pc&query=$account"
-                API_Status = "Not Found"
-                LastUpdated = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            }
-            if (-not $Silent) { Write-Host "[-] No stats found for $account" -ForegroundColor Yellow }
-        }
-
-        Start-Sleep -Milliseconds 500  # Rate limit protection
+        $url = "https://stats.cc/siege/$name"
+        if (-not $Silent) { Write-Host "Opening stats for $name on Stats.cc ..." -ForegroundColor Blue }
+        Start-Process $url
+        Start-Sleep -Seconds 0.5
     }
 
-    $r6sStatsText += "========================================================================`n"
-    $r6sStatsText += "Total Accounts Checked: $($r6sAccounts.Count)`n"
-    $r6sStatsText += "Stats Found: $(($allR6SStats | Where-Object { $_.API_Status -like 'Success*' } | Measure-Object | Select-Object -ExpandProperty Count))`n"
-    $r6sStatsText += "Generated: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")`n"
-    $r6sStatsText += "========================================================================`n"
-
-    # Write to log file
-    Add-Content -Path $LogFile -Value $r6sStatsText -ErrorAction SilentlyContinue
-
-    # Also export to CSV
-    $allR6SStats | Export-Csv -Path "$CsvFolder\R6S_Player_Stats.csv" -NoTypeInformation -Force -ErrorAction SilentlyContinue
+    # Also export the username list to CSV
+    $r6sAccounts | ForEach-Object { [PSCustomObject]@{ Username = $_; StatsCC = "https://stats.cc/siege/$_" } } | Export-Csv -Path "$CsvFolder\R6S_Usernames.csv" -NoTypeInformation -Force -ErrorAction SilentlyContinue
 }
 
 # ========== SUMMARY ==========
@@ -1187,7 +1016,7 @@ THREATS:
 RAINBOW SIX SIEGE:
   Accounts Discovered: $($r6sAccounts.Count)
   Accounts: $($r6sAccounts -join ', ')
-  Stats Queried: $(if ($allR6SStats) { $allR6SStats.Count } else { 0 })
+  Stats.cc Pages Opened: $($r6sAccounts.Count)
 "@
 Add-Content -Path $LogFile -Value "`n$summaryText" -ErrorAction SilentlyContinue
 # ========== ZIP ==========
@@ -1251,12 +1080,12 @@ if ($UploadURL) {
 # ========== CONSOLE OUTPUT ==========
 if (-not $Silent) {
     Write-Host "`n================================================================" -ForegroundColor Green
-    Write-Host "  AUDIT COMPLETE v6.2" -ForegroundColor Green
+    Write-Host "  AUDIT COMPLETE v6.3" -ForegroundColor Green
     Write-Host "================================================================" -ForegroundColor Green
     Write-Host "  Windows: $installDateStr ($daysInstall days)" -ForegroundColor Cyan
     Write-Host "  Devices: $($allPnp.Count) total PNP | Prefetch: $($prefetch.Count) files" -ForegroundColor Cyan
     Write-Host "  AI Bots: $($aiBotProcesses.Count) detected | Threats: $($susProcs.Count + $foundFiles.Count + $susGameFiles.Count)" -ForegroundColor Cyan
-    Write-Host "  R6S Accounts: $($r6sAccounts.Count) found | Stats Queried: $(if ($allR6SStats) { $allR6SStats.Count } else { 0 })" -ForegroundColor Cyan
+    Write-Host "  R6S Accounts: $($r6sAccounts.Count) found | Stats.cc pages opened" -ForegroundColor Cyan
     Write-Host "  Log: $LogFile" -ForegroundColor Cyan
     if ($ZipResults -and (Test-Path $zipPath)) { Write-Host "  ZIP: $zipPath" -ForegroundColor Cyan }
     Write-Host "================================================================" -ForegroundColor Green
