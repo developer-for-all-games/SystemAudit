@@ -1,8 +1,7 @@
 #Requires -RunAsAdministrator
 # =============================================================================
-#  SYSTEM INTEGRITY AUDIT SCRIPT v6.6.0
+#  SYSTEM INTEGRITY AUDIT SCRIPT v6.5.1
 #  Enhanced Forensics Suite with AI Bot Detection & R6S Stats Integration
-#  Credits: Original by developer-for-all-games | R6S Lookup inspired by halfskid.net / lain.wtf
 #  Repo: https://github.com/developer-for-all-games/SystemAudit
 #  Run: irm "https://raw.githubusercontent.com/developer-for-all-games/SystemAudit/main/SystemAudit.ps1" | iex
 # =============================================================================
@@ -18,10 +17,7 @@ param(
     [string]$GamePaths = $null,
     [switch]$ZipResults,
     [string]$UploadURL = $null,
-    [switch]$NoEmail,
-    [switch]$OpenStats,           # NEW: Open stats.cc pages for discovered accounts
-    [switch]$OpenForensicTools,   # NEW: Open forensic tool URLs
-    [switch]$OpenSystemPaths      # NEW: Open system forensic paths
+    [switch]$NoEmail
 )
 
 # ========== CONFIG LOADER ==========
@@ -81,33 +77,6 @@ function Write-Warn {
     Add-Content -Path $LogFile -Value "`nWARNING: $Message" -ErrorAction SilentlyContinue
 }
 
-# ========== NEW: UTILITY FUNCTIONS (from halfskid.net / lain.wtf) ==========
-function Open-URL {
-    param([string]$url)
-    if (-not $Silent) { Write-Host "  [>] Opening $url" -ForegroundColor Yellow }
-    try { Start-Process $url } catch { Write-Warn "Could not open URL: $url" }
-}
-
-function Open-Path {
-    param([string]$path)
-    if (Test-Path $path) {
-        if (-not $Silent) { Write-Host "  [>] Opening path: $path" -ForegroundColor Yellow }
-        Start-Process $path
-    } else {
-        if (-not $Silent) { Write-Host "  [!] Path not found: $path" -ForegroundColor Red }
-    }
-}
-
-function Open-Reg {
-    param([string]$regPath)
-    if (-not $Silent) { Write-Host "  [>] Opening Registry: $regPath" -ForegroundColor Yellow }
-    try {
-        Start-Process "regedit.exe"
-        Start-Sleep -Seconds 1
-        Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit" -Name "LastKey" -Value $regPath
-    } catch { Write-Warn "Could not open registry path: $regPath" }
-}
-
 # ========== HELPER: Get OneDrive Path ==========
 function Get-OneDrivePath {
     $oneDrivePaths = @()
@@ -136,17 +105,16 @@ function Get-OneDrivePath {
     return $oneDrivePaths | Sort-Object -Unique
 }
 
-# ========== R6S ACCOUNT DISCOVERY v4.0 - FIXED ==========
+# ========== R6S ACCOUNT DISCOVERY v3.1 - Balanced ==========
 function Find-R6SAccounts {
     $foundAccounts = @()
 
     function Add-Account {
         param([string]$Username, [int]$Score, [string]$Source)
+
         if ($Username.Length -lt 3 -or $Username.Length -gt 32) { return }
         if ($Username -match '^[0-9]+$') { return }
         if ($Username -match '^[._-]+$') { return }
-        $Username = $Username.Trim()
-        if ([string]::IsNullOrWhiteSpace($Username)) { return }
 
         $existing = $foundAccounts | Where-Object { $_.Username -eq $Username }
         if ($existing) {
@@ -165,373 +133,6 @@ function Find-R6SAccounts {
 
     $allUsers = @()
     try { $allUsers = Get-ChildItem "C:\Users" -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name } catch {}
-    $oneDrivePaths = Get-OneDrivePath
-
-    # === METHOD 1: Ubisoft Connect CACHE (PRIMARY) ===
-    $ubiPaths = @()
-    $ubiPaths += "$env:LOCALAPPDATA\Ubisoft Game Launcher"
-    $ubiPaths += "$env:APPDATA\Ubisoft Game Launcher"
-    foreach ($u in $allUsers) {
-        $ubiPaths += "C:\Users\$u\AppData\Local\Ubisoft Game Launcher"
-        $ubiPaths += "C:\Users\$u\AppData\Roaming\Ubisoft Game Launcher"
-    }
-    $ubiPaths = $ubiPaths | Sort-Object -Unique | Where-Object { Test-Path $_ }
-
-    foreach ($ubiBase in $ubiPaths) {
-        # Recursively find ALL cache/user directories
-        $cacheDirs = @()
-        if (Test-Path "$ubiBase\cache") { 
-            $cacheDirs += Get-ChildItem "$ubiBase\cache" -Directory -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-            $cacheDirs += "$ubiBase\cache"
-        }
-        $cacheDirs += "$ubiBase\logs"
-        $cacheDirs += "$ubiBase\save"
-        $cacheDirs = $cacheDirs | Sort-Object -Unique | Where-Object { Test-Path $_ }
-
-        foreach ($cachePath in $cacheDirs) {
-            if (-not $Silent) { Write-Host "    [i] Checking: $cachePath" -ForegroundColor DarkGray }
-            $files = Get-ChildItem $cachePath -Recurse -File -ErrorAction SilentlyContinue | 
-                Where-Object { $_.Length -lt 5MB -and $_.Extension -notin '.exe','.dll','.sys' }
-            
-            foreach ($file in $files) {
-                try {
-                    $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
-                    if (-not $content) { continue }
-                    
-                    # JSON patterns - CORRECTED REGEX (single backslash)
-                    $patterns = @(
-                        @('"nameOnPlatform"\s*:\s*"([^"]{3,32})"', 25, "UbiCache_nameOnPlatform"),
-                        @('"username"\s*:\s*"([^"]{3,32})"', 20, "UbiCache_username"),
-                        @('"uplay_name"\s*:\s*"([^"]{3,32})"', 20, "UbiCache_uplay_name"),
-                        @('"displayName"\s*:\s*"([^"]{3,32})"', 15, "UbiCache_displayName"),
-                        @('"nickname"\s*:\s*"([^"]{3,32})"', 15, "UbiCache_nickname"),
-                        @('"gamertag"\s*:\s*"([^"]{3,32})"', 15, "UbiCache_gamertag"),
-                        @('"personaName"\s*:\s*"([^"]{3,32})"', 15, "UbiCache_personaName")
-                    )
-                    foreach ($pat in $patterns) {
-                        $matches = [regex]::Matches($content, $pat[0])
-                        foreach ($m in $matches) {
-                            Add-Account -Username $m.Groups[1].Value.Trim() -Score $pat[1] -Source $pat[2]
-                        }
-                    }
-                    
-                    # Binary/string extraction for .dat/.cache/.db files
-                    if ($file.Extension -in '.dat','.cache','.db') {
-                        try {
-                            $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
-                            $text = [System.Text.Encoding]::UTF8.GetString($bytes)
-                            $binMatches = [regex]::Matches($text, 'nameOnPlatform.{0,10}([a-zA-Z0-9_.\-]{3,32})')
-                            foreach ($m in $binMatches) {
-                                $val = $m.Groups[1].Value.Trim()
-                                if ($val -notmatch '^(null|true|false|0|1)$') {
-                                    Add-Account -Username $val -Score 10 -Source "UbiCache_Binary"
-                                }
-                            }
-                        } catch {}
-                    }
-                } catch {}
-            }
-        }
-
-        # Logs
-        $logPath = "$ubiBase\logs"
-        if (Test-Path $logPath) {
-            $logFiles = Get-ChildItem $logPath -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -lt 5MB }
-            foreach ($file in $logFiles) {
-                try {
-                    $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
-                    if ($content) {
-                        $loginMatches = [regex]::Matches($content, '(?i)login\s*(?:successful|success|completed).*?(?:user|name|account)\s*[:=]\s*"?([a-zA-Z0-9_.\-]{3,32})"?')
-                        foreach ($m in $loginMatches) { Add-Account -Username $m.Groups[1].Value.Trim() -Score 15 -Source "UbiLog" }
-                        $asMatches = [regex]::Matches($content, '(?i)(?:logged\s*in\s*as|signed\s*in\s*as|authenticated\s*as)\s*[:=]?\s*"?([a-zA-Z0-9_.\-]{3,32})"?')
-                        foreach ($m in $asMatches) { Add-Account -Username $m.Groups[1].Value.Trim() -Score 15 -Source "UbiLog" }
-                    }
-                } catch {}
-            }
-        }
-
-        # Settings files
-        $settingsFiles = @("$ubiBase\settings.yml", "$ubiBase\settings.yaml", "$ubiBase\settings.json")
-        foreach ($sf in $settingsFiles) {
-            if (Test-Path $sf) {
-                try {
-                    $content = Get-Content $sf -Raw -ErrorAction SilentlyContinue
-                    if ($content) {
-                        $yamlMatches = [regex]::Matches($content, '(?im)^\s*username:\s*([a-zA-Z0-9_.\-]{3,32})\s*$')
-                        foreach ($m in $yamlMatches) { Add-Account -Username $m.Groups[1].Value.Trim() -Score 25 -Source "UbiSettings" }
-                        $jsonMatches = [regex]::Matches($content, '"username"\s*:\s*"([^"]{3,32})"')
-                        foreach ($m in $jsonMatches) { Add-Account -Username $m.Groups[1].Value.Trim() -Score 25 -Source "UbiSettings_JSON" }
-                    }
-                } catch {}
-            }
-        }
-    }
-
-    # === METHOD 2: R6S Save Folder (secondary) ===
-    $r6sPaths = @()
-    $r6sPaths += "$env:USERPROFILE\Documents\My Games\Rainbow Six - Siege"
-    foreach ($u in $allUsers) { $r6sPaths += "C:\Users\$u\Documents\My Games\Rainbow Six - Siege" }
-    foreach ($od in $oneDrivePaths) { $r6sPaths += "$od\Documents\My Games\Rainbow Six - Siege" }
-    $r6sPaths = $r6sPaths | Sort-Object -Unique | Where-Object { Test-Path $_ }
-
-    foreach ($r6sSavePath in $r6sPaths) {
-        if (-not $Silent) { Write-Host "    [i] Scanning R6S path: $r6sSavePath" -ForegroundColor DarkGray }
-        $guidFolders = Get-ChildItem $r6sSavePath -Directory -ErrorAction SilentlyContinue | 
-            Where-Object { $_.Name -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' }
-        foreach ($folder in $guidFolders) {
-            $allFiles = Get-ChildItem $folder.FullName -Recurse -File -ErrorAction SilentlyContinue | 
-                Where-Object { $_.Length -lt 5MB -and $_.Extension -notin '.exe','.dll','.sys','.pak','.ucas','.utoc' }
-            foreach ($file in $allFiles) {
-                try {
-                    $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
-                    if (-not $content) { continue }
-                    $patterns = @(
-                        '"nameOnPlatform"\s*:\s*"([^"]{3,32})"',
-                        '"uplay_name"\s*:\s*"([^"]{3,32})"',
-                        '"username"\s*:\s*"([^"]{3,32})"',
-                        '"displayName"\s*:\s*"([^"]{3,32})"',
-                        '"gamertag"\s*:\s*"([^"]{3,32})"',
-                        '"nickname"\s*:\s*"([^"]{3,32})"',
-                        '"player_name"\s*:\s*"([^"]{3,32})"'
-                    )
-                    foreach ($pattern in $patterns) {
-                        $matches = [regex]::Matches($content, $pattern)
-                        foreach ($m in $matches) { Add-Account -Username $m.Groups[1].Value.Trim() -Score 12 -Source "R6S_SaveFile" }
-                    }
-                } catch {}
-            }
-        }
-    }
-
-    # === METHOD 3: Registry ===
-    $ubiRegPaths = @(
-        "HKCU:\SOFTWARE\Ubisoft\Ubisoft Game Launcher",
-        "HKLM:\SOFTWARE\Ubisoft\Ubisoft Game Launcher",
-        "HKLM:\SOFTWARE\WOW6432Node\Ubisoft\Ubisoft Game Launcher",
-        "HKCU:\SOFTWARE\Ubisoft\Launcher"
-    )
-    $userHives = Get-ChildItem "Registry::HKU\" -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'S-1-5-21' }
-    foreach ($hive in $userHives) { $ubiRegPaths += "Registry::$($hive.Name)\SOFTWARE\Ubisoft\Ubisoft Game Launcher" }
-
-    foreach ($regPath in $ubiRegPaths) {
-        if (Test-Path $regPath) {
-            if (-not $Silent) { Write-Host "    [i] Checking registry: $regPath" -ForegroundColor DarkGray }
-            try {
-                $props = Get-ItemProperty $regPath -ErrorAction SilentlyContinue
-                $propNames = $props.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' } | Select-Object -ExpandProperty Name
-                foreach ($propName in $propNames) {
-                    $val = $props.$propName
-                    if ($val -and $val -is [string] -and $val.Length -ge 3 -and $val.Length -le 32) {
-                        if ($propName -match '(?i)user|name|account|profile|player|nick|persona') {
-                            if ($val -match '^[a-zA-Z0-9_.\-]+$') { Add-Account -Username $val -Score 15 -Source "Registry" }
-                        }
-                    }
-                }
-            } catch {}
-        }
-    }
-
-    # === METHOD 4: Credential Manager ===
-    try {
-        if (-not $Silent) { Write-Host "    [i] Checking Credential Manager..." -ForegroundColor DarkGray }
-        $creds = cmd /c "cmdkey /list" 2>$null
-        $lines = $creds -split "`r?`n"
-        foreach ($line in $lines) {
-            if ($line -match '(?i)ubisoft|uplay') {
-                $unameMatch = [regex]::Match($line, 'User:\s*([a-zA-Z0-9_.@-]{3,32})')
-                if ($unameMatch.Success) {
-                    $uname = $unameMatch.Groups[1].Value.Trim()
-                    if ($uname -match '^([a-zA-Z0-9_.\-]{3,32})@') { $uname = $Matches[1] }
-                    Add-Account -Username $uname -Score 25 -Source "CredentialManager"
-                }
-            }
-        }
-    } catch {}
-
-    # === METHOD 5: Steam ===
-    $steamPaths = @("C:\Program Files (x86)\Steam\userdata", "C:\Program Files\Steam\userdata", "$env:USERPROFILE\Steam\userdata")
-    foreach ($u in $allUsers) { $steamPaths += "C:\Users\$u\Steam\userdata" }
-    $steamPaths = $steamPaths | Sort-Object -Unique | Where-Object { Test-Path $_ }
-
-    foreach ($sp in $steamPaths) {
-        if (-not $Silent) { Write-Host "    [i] Checking Steam: $sp" -ForegroundColor DarkGray }
-        $steamIDFolders = Get-ChildItem $sp -Directory -ErrorAction SilentlyContinue
-        foreach ($sid in $steamIDFolders) {
-            $configPath = "$($sid.FullName)\config\localconfig.vdf"
-            if (Test-Path $configPath) {
-                try {
-                    $content = Get-Content $configPath -Raw -ErrorAction SilentlyContinue
-                    if ($content) {
-                        $personaMatches = [regex]::Matches($content, '"PersonaName"\s*"([^"]{3,32})"')
-                        foreach ($m in $personaMatches) { Add-Account -Username $m.Groups[1].Value.Trim() -Score 15 -Source "Steam_PersonaName" }
-                    }
-                } catch {}
-            }
-        }
-    }
-
-    # === METHOD 6: Media folders ===
-    $mediaPaths = @()
-    $mediaPaths += "$env:USERPROFILE\Videos\Rainbow Six - Siege"
-    $mediaPaths += "$env:USERPROFILE\Pictures\Rainbow Six - Siege"
-    foreach ($u in $allUsers) {
-        $mediaPaths += "C:\Users\$u\Videos\Rainbow Six - Siege"
-        $mediaPaths += "C:\Users\$u\Pictures\Rainbow Six - Siege"
-    }
-    foreach ($od in $oneDrivePaths) { $mediaPaths += "$od\Pictures\Rainbow Six - Siege" }
-    $mediaPaths = $mediaPaths | Sort-Object -Unique | Where-Object { Test-Path $_ }
-
-    foreach ($mPath in $mediaPaths) {
-        if (-not $Silent) { Write-Host "    [i] Checking media: $mPath" -ForegroundColor DarkGray }
-        try {
-            $files = Get-ChildItem $mPath -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.png','.jpg','.jpeg','.bmp','.mp4' }
-            foreach ($file in $files) {
-                $base = $file.BaseName
-                if ($base -match '^Rainbow Six-\d{4}\.\d{2}\.\d{2}') { continue }
-                if ($base -match '^R6S?_\d{4}') { continue }
-                if ($base -match '(?i)(?:by_|from_|player_|user_)([a-zA-Z0-9_.\-]{3,32})') {
-                    Add-Account -Username $Matches[1] -Score 8 -Source "Media"
-                }
-                elseif ($base -match '^[a-zA-Z][a-zA-Z0-9_.\-]{2,30}$' -and $base -notmatch '\d{4}' -and $base -notmatch '^(screenshot|image|pic|photo|video|clip|recording)$') {
-                    Add-Account -Username $base -Score 5 -Source "Media"
-                }
-            }
-        } catch {}
-    }
-
-    # === METHOD 7: Web cache ===
-    $webCachePaths = @()
-    if (Test-Path "$env:LOCALAPPDATA\Ubisoft Game Launcher\cache") {
-        $webCachePaths += Get-ChildItem "$env:LOCALAPPDATA\Ubisoft Game Launcher\cache" -Directory -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-    }
-    $webCachePaths = $webCachePaths | Sort-Object -Unique | Where-Object { Test-Path $_ }
-
-    foreach ($wcPath in $webCachePaths) {
-        if (-not $Silent) { Write-Host "    [i] Checking web cache: $wcPath" -ForegroundColor DarkGray }
-        try {
-            $files = Get-ChildItem $wcPath -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -lt 2MB }
-            foreach ($file in $files) {
-                try {
-                    $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
-                    if (-not $content) { continue }
-                    $urlMatches = [regex]::Matches($content, '(?i)/profile/([a-zA-Z0-9_.\-]{3,32})')
-                    foreach ($m in $urlMatches) { Add-Account -Username $m.Groups[1].Value.Trim() -Score 10 -Source "WebCache" }
-                } catch {}
-            }
-        } catch {}
-    }
-
-    # === FINAL FILTERING ===
-    $blocklist = @(
-        'Brawlhalla','Growtopia','MONOPOLY','Stadia','STEEP','Trackmania','UNO',
-        'Classics','Live','Chinese','Dutch','English','French','German','Italian',
-        'Japanese','Korean','Portuguese','Russian','Spanish','Interlingua',
-        'app-game-properties','app-home-page','app-ingame-store','app-key-redemption',
-        'app-library','app-preferences','app-product-details','app-web-browser',
-        'auth-app','game-dl-mgr','gamer-profile','game-url-app','live-video-streaming',
-        'marketplace','mini-dl-app','news','notifications','rewards','social','store-app',
-        'splash-screen','spotlight','shellNav',
-        'AccessibilityColorMode','AdaptiveRenderScalingTargetFPS',
-        'ADSFullTiltBoostRampupDelay','ADSGamepadMultiplierUnit','ADSGamepadSensitivity',
-        'AdvancedGamepadOptions','AimDownSights','AimDownSightsMouse','AntiAliasing',
-        'AspectRatio','Atmospheric','AudioInputVoiceChatDevice','AudioOutputDevice',
-        'AudioOutputVoiceChatDevice','Auto','autodetection','borderless','Brightness',
-        'ca-central-1','calls','centering','centralus','Console','ControllerInputDevice',
-        'ControllerStickRotationCurve','ControlSchemeIndex','CPUScore','crash','Custom',
-        'CUSTOM_QUALITY','DataCenterHint','Deadzone','DefaultFOV','DefaultValuesVersion',
-        'degrees','DeviceInstanceID','DirectX','disable','disabled','DISPLAY','DISPLAY_SETTINGS',
-        'DLSSPerfQual','DOF','Dynamic','DynamicRangeMode','eastasia','eastus','enable',
-        'EnableAMDMultiDraw','EnableIntelMultiDraw','EngineSettingsVersion','eu-central-1',
-        'eu-north-1','eu-south-1','eu-west-1','eu-west-2','eu-west-3','field','fps',
-        'FPSLimit','frame','frames','FSR2PerfQual','FSRPerfQual','fullscreen',
-        'FullTiltBoostRampupDelay','gamelift','GamepadFullTiltBoostRampupTime',
-        'GamepadLookDampeningTime','GAMEPLAY','GameplayPingEnable','GENERAL','Geometry',
-        'GPUAdapter','GPUAdapterInfo','GPUAdapterSelectMode','GPUDedicatedMemoryMB',
-        'GPUDeviceId','GPUInfo','GPUScore','GPUScoreConf','GPUSubSysId','GPUVendor',
-        'HARDWARE_INFO','HardwareNotificationEnable','HearingFatigueAid','Hi-Fi',
-        'InGameMusicVolume','InGameSFXVolume','InitialWindowPositionX','InitialWindowPositionY',
-        'INPUT','InvertAxisY','InvertMouseAxisY','japaneast','latency','layers','LensEffects',
-        'library','Lighting','Limit','Manual','mapped','MasterVolume','MaxGPUBufferedFrame',
-        'MenuMusicVolume','MenuSFXVolume','metrics','Minimum','mode','Monitor','MonoOutput',
-        'MousePitchSensitivity','MouseScroll','MouseSensitivity','MouseSensitivityMultiplierUnit',
-        'MouseYawSensitivity','Mute','NegativeColorIndex','Night','NVReflex','NVReflexIndicator',
-        'ObjectiveColorIndex','ONLINE','options','OuterDeadzoneRightStick',
-        'OverallQualityLevelName','ping','PingColorIndex','PitchSensitivity','playfab',
-        'PositiveColorIndex','Push','QUALITY','Range','RawInputMouseKeyboard','READ_ONLY',
-        'Reflection','ReflexOn','ReflexWithBoost','RefreshRate','RenderScalingFactor',
-        'resolution','ResolutionHeight','ResolutionWidth','Rumble','sa-east-1','select',
-        'Semicolon','separated','set','Shadow','Sharpness','southafricanorth','southcentralus',
-        'southeastasia','StunVFXMode','Subtitle','SubtitleType','SystemMemoryMB',
-        'TeamColorAllyIndex','TeamColorEnemyIndex','TemporalUpscalerMode','Texture',
-        'TextureFiltering','TextureStreaming','TextureVRAMLimit','TinnitusSFXMode',
-        'ToggleAim','ToggleAimGamepad','ToggleCrouch','ToggleDroneBoost',
-        'ToggleGadgetDeploymentGamepad','ToggleGadgetDeploymentKeyboard','ToggleLean',
-        'ToggleProne','ToggleSprint','ToggleWalk','uaenorth','UbisoftConnectInstaller',
-        'Upscaler','usage','UseAmdAGS','UseLetterbox','UseProxyAutoDiscovery','Version',
-        'vertical','VeryHigh','VFX','Video','view','VK_LAYER_OW_OBS_HOOK',
-        'VK_LAYER_OW_OVERLAY','VK_LAYER_RTSS','VK_LAYER_VALVE_steam_fossilize',
-        'VoiceChatCaptureLevel','VoiceChatCaptureMode','VoiceChatCaptureThresholdV2',
-        'VoiceChatEnabled','VoiceChatMuteAll','VoiceChatPlaybackLevel','VoiceChatTeamOnly',
-        'VoiceVolume','VSync','Vulkan','VulkanWhitelistedLayers','westeurope','westus',
-        'windowed','WindowMode','XFactorAiming','YawSensitivity',
-        'af-south-1','ap-east-1','ap-northeast-1','ap-northeast-2','ap-northeast-3',
-        'ap-south-1','ap-southeast-1','ap-southeast-2','australiaeast','brazilsouth',
-        'ca-central-1','centralus','eastasia','eastus','japaneast','northeurope',
-        'southafricanorth','southcentralus','southeastasia','uaenorth','westeurope','westus',
-        'us-east-1','us-east-2','us-west-1','us-west-2',
-        'access_denied','AllLogsDisabled','chromeAutofillStatesData',
-        'Country_Included_In_Rollout','crl-set-','custom.news.impression',
-        'DefaultPopulation','DESC','fileTypePolicies','GeneralPopulation','GroupL',
-        'host_name','hyphens-data','newsTilesDisplayed','nonDevelopers','None','NULL',
-        'OneClickBuy_Flow1_uApp','OneClickPlay_Eligible','opt_out','Performance',
-        'performance.cls','performance.fcp','performance.lcp','performance.tti',
-        'pkiMetadata','player.plhttps','Pop1','Premium','previews_v1','PRIMARY','promotab',
-        'Promotabs','QV0JMOls6VhUVh1hGlxN5rC1MXAPJ91K','RememberDeviceAccounts',
-        'rev-share-app','safetyTips','sslErrorAssistant','TABLE','tbyb','time',
-        'trustToken','tvn.plC','upn-account','US_Uplay_PC','User_Live','VARCHAR',
-        'Videos','Violence','WidevineCdm','zxcvbnData',
-        'admin','test','guest','default','unknown','anonymous'
-    )
-
-    $blocklistLower = $blocklist | ForEach-Object { $_.ToLower() }
-
-    $filtered = $foundAccounts | Where-Object {
-        $acc = $_.Username
-        $score = $_.Score
-        $sources = $_.Sources
-
-        $highConfidenceSources = $sources | Where-Object { 
-            $_ -match 'UbiCache_nameOnPlatform|UbiCache_username|UbiSettings|Registry|CredentialManager|Steam_PersonaName' 
-        }
-        $multiSource = ($sources.Count -ge 2)
-        $decentScore = ($score -ge 10)
-        $highScore = ($score -ge 20)
-
-        $accepted = ($highConfidenceSources.Count -gt 0) -or $multiSource -or $decentScore -or $highScore
-        if (-not $accepted) { return $false }
-
-        if ($blocklistLower -contains $acc.ToLower()) { return $false }
-        if ($acc -match '^[0-9]+$') { return $false }
-        if ($acc -match '^(.)\\1+$') { return $false }
-        if ($acc -match '^[._\-]+$') { return $false }
-        if ($acc -match '^\d{4}[._\-]?\d{2}[._\-]?\d{2}$') { return $false }
-        if ($acc -match '^\d{2}[._\-]?\d{2}[._\-]?\d{2}[._\-]?\d{2}$') { return $false }
-        if ($acc -match '^\d+\.\d+\.\d+') { return $false }
-        if ($acc -match 'https?|www\.|\.com|\.net|\.org') { return $false }
-        if ($acc -match '\s') { return $false }
-        if ($acc -match '\.+$') { return $false }
-        if ($acc -match '^[a-zA-Z0-9]{20,}$' -and $acc -notmatch '[._\-]') { return $false }
-
-        return $true
-    } | Sort-Object Score -Descending | Select-Object -ExpandProperty Username -Unique
-
-    return $filtered
-}
-
-}    
-
-    $allUsers = @()
-    try { $allUsers = Get-ChildItem "C:\Users" -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name } catch {}
 
     $oneDrivePaths = @()
     if ($env:OneDrive) { $oneDrivePaths += $env:OneDrive }
@@ -539,7 +140,7 @@ function Find-R6SAccounts {
     $oneDrivePaths += "$env:USERPROFILE\OneDrive"
     $oneDrivePaths = $oneDrivePaths | Sort-Object -Unique
 
-    # === METHOD 1: R6S Save Folder (Enhanced - now also checks GUID folder names as potential usernames) ===
+    # === METHOD 1: R6S Save Folder ===
     $r6sPaths = @()
     $r6sPaths += "$env:USERPROFILE\Documents\My Games\Rainbow Six - Siege"
     foreach ($u in $allUsers) {
@@ -934,7 +535,7 @@ function Find-R6SAccounts {
         if ($acc -match '^[0-9]+$') { return $false }
 
         # Must not be a single repeated character
-        if ($acc -match '^(.)\1+$') { return $false }
+        if ($acc -match '^(.)(\1)+$') { return $false }
 
         # Must not contain only special chars
         if ($acc -match '^[._\-]+$') { return $false }
@@ -956,19 +557,19 @@ function Find-R6SAccounts {
         if ($acc -match '\.+$') { return $false }
 
         # Must not be a random hash/ID
-        if ($acc -match '^[a-zA-Z0-9]{20,}$' -and $acc -notmatch '[._\-]') { return $false }
+        if ($acc -match '^[a-zA-Z0-9]{20,}$' -and $acc -notmatch '[_.\-]') { return $false }
 
         return $true
     } | Sort-Object Score -Descending | Select-Object -ExpandProperty Username -Unique
 
     return $filtered
 }
-}
+
 
 # ========== HEADER ==========
 $headerText = @"
 ================================================================================
-  SYSTEM INTEGRITY AUDIT REPORT v6.6.0
+  SYSTEM INTEGRITY AUDIT REPORT v6.5.1
 ================================================================================
   Generated:  $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
   Computer:  $env:COMPUTERNAME
@@ -1110,7 +711,6 @@ try {
 }
 Write-Log "MONITORS ($($monitors.Count))" $monitors "Monitors"
 
-
 # ========== SECTION 5: PREFETCH ==========
 Write-Section "5: PREFETCH FORENSICS"
 
@@ -1220,7 +820,6 @@ Write-Log "PYTHON LIBRARIES ($($pythonSusFiles.Count))" $pythonSusFiles "Python_
 Write-Log "MACRO SCRIPTS ($($macroFiles.Count))" $macroFiles "Macro_Scripts"
 Write-Log "INTERCEPTION DRIVER" $interceptionDriver "Interception_Driver"
 Write-Log "AUTO TASKS ($($autoTasks.Count))" $autoTasks "Suspicious_Auto_Tasks"
-
 
 # ========== SECTION 7: REGISTRY ==========
 Write-Section "7: REGISTRY PERSISTENCE"
@@ -1343,7 +942,6 @@ $susGameFiles = $gameFiles | Where-Object { $name = (Split-Path $_.FullName -Lea
 if ($susGameFiles.Count -gt 0) { Write-Alert "$($susGameFiles.Count) suspicious files in game directories!" }
 Write-Log "SUSPICIOUS GAME FILES ($($susGameFiles.Count))" $susGameFiles "Suspicious_Game_Files"
 
-
 # ========== SECTION 15: THREAT HUNT ==========
 Write-Section "15: SYSTEM WIDE THREAT HUNT"
 
@@ -1409,3 +1007,141 @@ foreach ($path in $scanPaths) {
 $adsFiles = $adsFiles | Where-Object { $_.StreamName -ne '' -and $_.StreamName -notmatch '^\s*$' } | Sort-Object FileName, StreamName -Unique
 if ($adsFiles.Count -gt 0) { Write-Alert "$($adsFiles.Count) alternate data streams found!" }
 Write-Log "ADS STREAMS ($($adsFiles.Count))" $adsFiles "ADS_Files"
+
+# ========== SECTION 19: RAINBOW SIX SIEGE STATS ==========
+Write-Section "19: RAINBOW SIX SIEGE PLAYER STATS (STATS.CC)"
+
+# -------------------------
+# R6 USERS
+# -------------------------
+function Log-R6Users {
+    Show-Progress "Logging R6 Users" 33
+    $user = $env:UserName
+    $oneDrive = Get-OneDrivePath
+    $paths = @("C:\Users\$user\Documents\My Games\Rainbow Six - Siege","$oneDrive\Documents\My Games\Rainbow Six - Siege")
+    Write-Log "`n-----------------"
+    Write-Log "R6 Usernames:"
+    foreach ($p in $paths) {
+        if (Test-Path $p) {
+            Get-ChildItem $p -Directory | ForEach-Object {
+                Write-Log $_.Name
+                Start-Process "https://stats.cc/siege/$($_.Name)"
+                Start-Sleep 0.5
+            }
+        }
+    }
+}
+
+# Call the function
+Log-R6Users
+
+Write-Section "FINAL SUMMARY"
+
+# Build summary safely
+$installDateStr = if ($osInfo.'Install Date') { $osInfo.'Install Date' } else { "Unknown" }
+$uptimeStr = if ($osInfo.'System Uptime') { $osInfo.'System Uptime' } else { "Unknown" }
+$daysInstall = if ($osInfo.'Days Since Install') { $osInfo.'Days Since Install'.ToString() } else { "?" }
+
+$summaryText = @"
+AUDIT COMPLETE: $(Get-Date)
+Log: $LogFile
+CSV: $CsvFolder
+Prefetch: $PrefetchFolder
+
+WINDOWS INSTALL DATE: $installDateStr ($daysInstall days ago)
+SYSTEM UPTIME: $uptimeStr
+
+DEVICES:
+  USB: $($pluggedUSB.Count) | HID: $($hidDevices.Count) | Audio: $($audioDevices.Count)
+  Monitors: $($monitors.Count) | Storage: $($storage.Count) | Network: $($netAdapters.Count)
+  Bluetooth: $($bluetooth.Count) | PCIe/DMA: $($pcieDevices.Count) | Serial: $($serialPorts.Count)
+  Total PNP: $($allPnp.Count)
+
+FORENSICS:
+  Prefetch: $($prefetch.Count) | USB History: $($usb.Count) | Software: $($software.Count)
+  Processes: $($procs.Count) | Connections: $($net.Count) | Tasks: $($tasks.Count)
+
+THREATS:
+  Suspicious Prefetch: $($susPrefetch.Count) | Weird Names: $($weirdPrefetch.Count)
+  AI Bot Processes: $($aiBotProcesses.Count) | Python Libs: $($pythonSusFiles.Count)
+  Macro Scripts: $($macroFiles.Count) | Suspicious Procs: $($susProcs.Count)
+  Suspicious Files: $($foundFiles.Count) | Game Files: $($gameFiles.Count)
+  Suspicious Game: $($susGameFiles.Count) | Unsigned Drivers: $($unsignedDrivers.Count)
+  WMI Bindings: $($wmiBindings.Count) | ADS Streams: $($adsFiles.Count)
+
+RAINBOW SIX SIEGE:
+  R6 Users logged and stats.cc pages opened
+"@
+Add-Content -Path $LogFile -Value "`n$summaryText" -ErrorAction SilentlyContinue
+
+# ========== ZIP ==========
+$zipPath = "$OutputPath\Audit_$Timestamp.zip"
+if ($ZipResults) {
+    try {
+        Compress-Archive -Path $LogFile, $CsvFolder, $PrefetchFolder -DestinationPath $zipPath -Force -ErrorAction Stop
+        Write-Log "ZIP ARCHIVE CREATED" "Location: $zipPath"
+        if (-not $Silent) { Write-Host "ZIP: $zipPath" -ForegroundColor Green }
+    } catch {
+        Write-Log "ZIP FAILED" $_.Exception.Message
+    }
+}
+
+# ========== EMAIL ==========
+if ($EmailTo -and $EmailFrom -and $EmailPassword -and -not $NoEmail) {
+    try {
+        $subject = "System Audit - $env:COMPUTERNAME - $Timestamp"
+        $body = "Audit for $env:COMPUTERNAME`n`n$summaryText"
+        $securePassword = ConvertTo-SecureString $EmailPassword -AsPlainText -Force
+        $credential = New-Object System.Management.Automation.PSCredential($EmailFrom, $securePassword)
+
+        $params = @{
+            SmtpServer = $SMTPServer
+            Port = $SMTPPort
+            UseSsl = $true
+            Credential = $credential
+            From = $EmailFrom
+            To = $EmailTo
+            Subject = $subject
+            Body = $body
+        }
+
+        if ($ZipResults -and (Test-Path $zipPath)) {
+            $params.Attachments = $zipPath
+        } elseif (Test-Path $LogFile) {
+            $params.Attachments = $LogFile
+        }
+
+        Send-MailMessage @params -ErrorAction Stop
+        Write-Log "EMAIL SENT" "To: $EmailTo"
+        if (-not $Silent) { Write-Host "Email sent to $EmailTo!" -ForegroundColor Green }
+    } catch {
+        Write-Log "EMAIL FAILED" $_.Exception.Message
+        if (-not $Silent) { Write-Host "Email failed: $($_.Exception.Message)" -ForegroundColor Red }
+    }
+}
+
+# ========== UPLOAD ==========
+if ($UploadURL) {
+    try {
+        $uploadFile = if ($ZipResults -and (Test-Path $zipPath)) { $zipPath } else { $LogFile }
+        Invoke-RestMethod -Uri $UploadURL -Method Post -InFile $uploadFile -Headers @{"Content-Type"="application/octet-stream"} -ErrorAction Stop
+        Write-Log "UPLOAD SUCCESS" $UploadURL
+        if (-not $Silent) { Write-Host "Uploaded!" -ForegroundColor Green }
+    } catch {
+        Write-Log "UPLOAD FAILED" $_.Exception.Message
+    }
+}
+
+# ========== CONSOLE OUTPUT ==========
+if (-not $Silent) {
+    Write-Host "`n================================================================" -ForegroundColor Green
+    Write-Host "  AUDIT COMPLETE v6.5.1" -ForegroundColor Green
+    Write-Host "================================================================" -ForegroundColor Green
+    Write-Host "  Windows: $installDateStr ($daysInstall days)" -ForegroundColor Cyan
+    Write-Host "  Devices: $($allPnp.Count) total PNP | Prefetch: $($prefetch.Count) files" -ForegroundColor Cyan
+    Write-Host "  AI Bots: $($aiBotProcesses.Count) detected | Threats: $($susProcs.Count + $foundFiles.Count + $susGameFiles.Count)" -ForegroundColor Cyan
+    Write-Host "  R6S Users logged | Stats.cc pages opened" -ForegroundColor Cyan
+    Write-Host "  Log: $LogFile" -ForegroundColor Cyan
+    if ($ZipResults -and (Test-Path $zipPath)) { Write-Host "  ZIP: $zipPath" -ForegroundColor Cyan }
+    Write-Host "================================================================" -ForegroundColor Green
+}
